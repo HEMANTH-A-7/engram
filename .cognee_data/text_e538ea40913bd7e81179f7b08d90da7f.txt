@@ -1,1 +1,0 @@
-The Python programming language was created by Guido van Rossum in 1991.

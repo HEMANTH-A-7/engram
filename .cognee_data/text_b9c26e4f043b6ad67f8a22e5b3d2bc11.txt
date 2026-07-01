@@ -1,1 +1,0 @@
-Grace Hopper developed the first compiler and popularized the term 'debugging'.

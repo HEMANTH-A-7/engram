@@ -10,6 +10,7 @@ __pycache__/
 # Cognee local stores (SQLite + LanceDB, generated data)
 .cognee_system/
 .data_storage/
+.cognee_data/
 cognee_data/
 *.sqlite
 *.lance/
@@ -22,3 +23,6 @@ benchmark/results/*.json
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code local overrides (personal, not shared)
+.claude/settings.local.json

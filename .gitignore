@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Env / secrets
+.env
+
+# Cognee local stores (SQLite + LanceDB, generated data)
+.cognee_system/
+.data_storage/
+cognee_data/
+*.sqlite
+*.lance/
+
+# Benchmark artifacts (regenerable)
+benchmark/results/*.json
+!benchmark/results/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

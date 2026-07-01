@@ -11,6 +11,12 @@ Conflict-resolution accuracy and $ cost/query are intentionally not measured
 here — those need components that don't exist yet (Buckets 3 and 5). This is
 the "minimal" v1 the build-order decision (D3, PROGRESS.md) calls for.
 
+Cognee's Ollama adapter hardcodes 2 structured-output retries (not
+configurable) and batches every fact into one `cognify()` pipeline run, so a
+single flaky extraction (e.g. gemma4 emitting a null `description`) aborts the
+whole run. `cognify()` is retried a bounded number of times at the harness
+level to absorb that — logged, not masked, via `result["cognify_attempts"]`.
+
 Run: `uv run python -m benchmark.harness`
 """
 
@@ -30,6 +36,7 @@ from core.config import REPO_ROOT
 
 RESULTS_DIR = REPO_ROOT / "benchmark" / "results"
 K_VALUES = (1, 3, 5)
+MAX_COGNIFY_ATTEMPTS = 3
 
 
 def _hit_text(hit) -> str:
@@ -54,14 +61,31 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
 
+async def _ingest_and_cognify(dataset: str, all_facts: list[str]) -> int:
+    """Reset, add, and cognify, retrying the whole batch on extraction flakiness.
+
+    Returns the number of attempts taken (1 = succeeded first try).
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_COGNIFY_ATTEMPTS + 1):
+        await store.reset()
+        for fact in all_facts:
+            await store.add(fact, dataset=dataset)
+        try:
+            await store.cognify(dataset=dataset)
+            return attempt
+        except Exception as exc:  # noqa: BLE001 - gemma4 structured-output flakiness
+            last_error = exc
+            print(f"  cognify attempt {attempt}/{MAX_COGNIFY_ATTEMPTS} failed: {exc}")
+    raise RuntimeError(
+        f"cognify failed after {MAX_COGNIFY_ATTEMPTS} attempts"
+    ) from last_error
+
+
 async def run(dataset: str = "benchmark_dataset", label: str = "baseline") -> dict:
     """Reset storage, ingest the eval set, and measure recall@k + latency."""
-    await store.reset()
-
     all_facts = [fact for case in EVAL_CASES for fact in case.facts]
-    for fact in all_facts:
-        await store.add(fact, dataset=dataset)
-    await store.cognify(dataset=dataset)
+    cognify_attempts = await _ingest_and_cognify(dataset, all_facts)
 
     max_k = max(K_VALUES)
     hits_at_k = {k: 0 for k in K_VALUES}
@@ -93,6 +117,7 @@ async def run(dataset: str = "benchmark_dataset", label: str = "baseline") -> di
         "label": label,
         "n_cases": n,
         "n_facts": len(all_facts),
+        "cognify_attempts": cognify_attempts,
         "recall": recall,
         "latency": latency,
     }

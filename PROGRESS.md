@@ -32,6 +32,8 @@ Spec: `/Users/hemanth/Downloads/memory-layer-project-spec.md`.
 - **`LLM_TEMPERATURE=0.3`**: at temp 0, instructor retries are identical, so a single null-for-required-string response never recovers. A small temp makes retries vary and succeed. Tradeoff: extraction is nondeterministic (acceptable; eval set is fixed, average over runs).
 - Needs `transformers` (BERT tokenizer `HUGGINGFACE_TOKENIZER=bert-base-uncased`, one-time download) and `COGNEE_SKIP_CONNECTION_TEST=true` (30s pre-flight < Ollama cold start).
 - Cognee is graph-provider **ladybug** + vector by default; storage pinned to repo `.cognee_data/` + `.cognee_system/`.
+- **Ollama structured-output retries are hardcoded to 2** (`cognee/.../llm/ollama/adapter.py`, not env-configurable), and `cognify()` batches every fact into one pipeline run — one flaky extraction (gemma4 emitting a null `description`) aborts the whole batch. Observed 3/3 attempts needed on an 8-fact benchmark run, so this isn't rare. `benchmark/harness.py` retries the whole ingest+cognify batch (bounded at 3, logged via `cognify_attempts`) to compensate; `core/store.py` (the baseline pipeline) is left vanilla.
+- **Raw CHUNKS retrieval latency is high locally**: p50 ≈13s / p95 ≈21s per query on the 8-fact benchmark set, on local Ollama CPU (no GPU). Expected given the hardware — real baseline number, not a bug to chase.
 
 ### Open decision to confirm with user
 - **D5 (Bucket 5 router)**: spec wants a cheap/small model for routine extraction, but 3B can't do reliable structured graph extraction. Router "cheap path" must be a model that CAN (e.g. a 7B). Revisit at Bucket 5.
@@ -39,7 +41,7 @@ Spec: `/Users/hemanth/Downloads/memory-layer-project-spec.md`.
 ## Bucket status
 - [x] **Bucket 0 — Scaffold & env** ✅ (2026-07-01): repo skeleton, uv/py3.12, deps, unified Ollama config, offline smoke test all-green.
 - [x] **Bucket 1 — Baseline Cognee pipeline** ✅ (2026-07-01): `core/store.py` wrapper (add/cognify/search), `scripts/baseline_demo.py`, `tests/test_baseline.py` integration test PASSES (229s). GRAPH_COMPLETION correctly answers offline.
-- [ ] Bucket 2 — Minimal benchmark harness (recall@k, latency) on baseline
+- [x] **Bucket 2 — Minimal benchmark harness (recall@k, latency) on baseline** ✅ (2026-07-01): `benchmark/eval_set.py` (8 stable-fact cases), `benchmark/harness.py` (recall@{1,3,5} + latency p50/p95, writes `benchmark/results/<label>.json`), `tests/test_benchmark.py` integration test PASSES (914s). Baseline results: recall@1/3/5 = **1.0**, latency p50 **≈13.0s** / p95 **≈20.8s** per query. `cognify()` needed 3/3 retry attempts to succeed (see Hard-won facts above).
 - [ ] Bucket 3 — Conflict resolver (bi-temporal fact versioning) + extend harness
 - [ ] Bucket 4 — Consolidation / forgetting policy (tiering, regret rate)
 - [ ] Bucket 5 — Cost-aware extraction router
@@ -55,4 +57,5 @@ contract from the FastAPI backend + a layout brief. Nothing needed before then.
 - Reviewed spec, surfaced offline-vs-cost tension, locked D1–D4.
 - **Bucket 0 done**: uv + py3.12 env, Cognee 1.2.2, repo skeleton, unified `.env` on Cognee's scheme, `scripts/smoke.py` green offline. Committed.
 - **Bucket 1 done**: baseline pipeline working offline. Spent most effort reverse-engineering Cognee 1.2's Ollama config (endpoints, bare model names, extraction model, temperature) — all captured above. Integration test green.
-- Next: Bucket 2 — minimal benchmark harness (recall@k, latency) over the baseline.
+- **Bucket 2 done**: benchmark harness v1 (8 synthetic stable-fact eval cases, recall@{1,3,5} + latency p50/p95). First run failed outright — gemma4 emitted a null `description` field and Cognee's hardcoded 2-attempt retry couldn't recover; added a harness-level bounded retry (3 attempts) around the whole ingest+cognify batch, logged via `cognify_attempts` rather than silently swallowed. Second run succeeded on the 3rd attempt: recall@1/3/5 = 1.0, latency p50 ≈13s / p95 ≈21s (local CPU Ollama — high but real, this is the before/after baseline for later buckets). Integration test green (914s).
+- Next: Bucket 3 — conflict resolver (bi-temporal fact versioning: `event_time`/`ingestion_time`, supersede-not-overwrite on contradiction), then extend the eval set with contradiction/update cases so recall@k + a new conflict-resolution-accuracy metric can be compared before/after.

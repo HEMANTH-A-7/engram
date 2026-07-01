@@ -10,15 +10,25 @@ dependencies = [
     "uvicorn>=0.29",
     "mcp>=1.0",
     "httpx>=0.27",
+    "transformers>=5.12.1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: runs the real Cognee+Ollama pipeline (slow, offline)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
 
 [tool.uv]
 package = false

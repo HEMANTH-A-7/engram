@@ -23,11 +23,22 @@ Spec: `/Users/hemanth/Downloads/memory-layer-project-spec.md`.
 - `uv` at `~/.local/bin/uv`. Python pinned **3.12.13**. **Cognee 1.2.2** installed (spec assumed 0.1.x — 1.x adds remember/recall/forget but V1 add/cognify/search still work).
 - **Config is unified on Cognee's canonical env names** (`LLM_*`, `EMBEDDING_*`, litellm-style `ollama/<model>`); `core/config.py` reads the same `.env`. Router extras: `MEMORY_MODEL_SMALL/LARGE`.
 - Cognee gotcha: for `ollama`, it requires the full trio `LLM_MODEL`+`LLM_ENDPOINT`+`LLM_API_KEY` (and `EMBEDDING_PROVIDER`+`EMBEDDING_MODEL`+`EMBEDDING_DIMENSIONS`) or import fails. `LLM_API_KEY=ollama` is a dummy.
-- Verify: `uv run python scripts/smoke.py` → all green offline.
+- Verify: `uv run python scripts/smoke.py` → all green offline; `uv run pytest -m integration -q` → baseline passes (~4 min).
+
+### Hard-won Cognee+Ollama config facts (don't relearn these)
+- **Endpoints differ by role**: LLM `LLM_ENDPOINT=http://localhost:11434/v1` (instructor uses a raw OpenAI client); embeddings `EMBEDDING_ENDPOINT=http://localhost:11434/api/embed` (native path). `core/config._openai_base()` normalizes either back to `<host>/v1` for our own calls.
+- **Bare model names** (no `ollama/` prefix): the native adapters pass the name verbatim and Ollama 404s on the prefix. `LLM_MODEL=gemma4:latest`, `EMBEDDING_MODEL=nomic-embed-text`.
+- **Extraction model = gemma4**, NOT llama3.2:3b. 3B models echo the JSON *schema* instead of an instance → validation fail. **→ D5 below.**
+- **`LLM_TEMPERATURE=0.3`**: at temp 0, instructor retries are identical, so a single null-for-required-string response never recovers. A small temp makes retries vary and succeed. Tradeoff: extraction is nondeterministic (acceptable; eval set is fixed, average over runs).
+- Needs `transformers` (BERT tokenizer `HUGGINGFACE_TOKENIZER=bert-base-uncased`, one-time download) and `COGNEE_SKIP_CONNECTION_TEST=true` (30s pre-flight < Ollama cold start).
+- Cognee is graph-provider **ladybug** + vector by default; storage pinned to repo `.cognee_data/` + `.cognee_system/`.
+
+### Open decision to confirm with user
+- **D5 (Bucket 5 router)**: spec wants a cheap/small model for routine extraction, but 3B can't do reliable structured graph extraction. Router "cheap path" must be a model that CAN (e.g. a 7B). Revisit at Bucket 5.
 
 ## Bucket status
 - [x] **Bucket 0 — Scaffold & env** ✅ (2026-07-01): repo skeleton, uv/py3.12, deps, unified Ollama config, offline smoke test all-green.
-- [ ] Bucket 1 — Baseline Cognee pipeline (add → cognify → search)
+- [x] **Bucket 1 — Baseline Cognee pipeline** ✅ (2026-07-01): `core/store.py` wrapper (add/cognify/search), `scripts/baseline_demo.py`, `tests/test_baseline.py` integration test PASSES (229s). GRAPH_COMPLETION correctly answers offline.
 - [ ] Bucket 2 — Minimal benchmark harness (recall@k, latency) on baseline
 - [ ] Bucket 3 — Conflict resolver (bi-temporal fact versioning) + extend harness
 - [ ] Bucket 4 — Consolidation / forgetting policy (tiering, regret rate)
@@ -43,4 +54,5 @@ contract from the FastAPI backend + a layout brief. Nothing needed before then.
 ### Session 1 — 2026-07-01
 - Reviewed spec, surfaced offline-vs-cost tension, locked D1–D4.
 - **Bucket 0 done**: uv + py3.12 env, Cognee 1.2.2, repo skeleton, unified `.env` on Cognee's scheme, `scripts/smoke.py` green offline. Committed.
-- Next: Bucket 1 — baseline `add → cognify → search` end to end against Ollama.
+- **Bucket 1 done**: baseline pipeline working offline. Spent most effort reverse-engineering Cognee 1.2's Ollama config (endpoints, bare model names, extraction model, temperature) — all captured above. Integration test green.
+- Next: Bucket 2 — minimal benchmark harness (recall@k, latency) over the baseline.

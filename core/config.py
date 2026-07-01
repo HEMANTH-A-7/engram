@@ -43,6 +43,16 @@ def bare_model(model: str) -> str:
     return model.split("/", 1)[1] if "/" in model else model
 
 
+def _openai_base(endpoint: str) -> str:
+    """Reduce any Ollama endpoint to its OpenAI-compatible base (`<host>/v1`)."""
+    base = endpoint.rstrip("/")
+    for suffix in ("/api/embeddings", "/api/embed", "/api", "/v1"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return f"{base.rstrip('/')}/v1"
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     provider: str = os.environ.get("LLM_PROVIDER", "ollama")
@@ -54,9 +64,12 @@ class LLMConfig:
     model_large: str = os.environ.get("MEMORY_MODEL_LARGE", "ollama/gemma4:latest")
 
     def openai_base(self) -> str:
-        """OpenAI-compatible base URL for direct HTTP calls."""
-        base = self.endpoint.rstrip("/")
-        return base if base.endswith("/v1") else f"{base}/v1"
+        """OpenAI-compatible base URL for our own direct HTTP calls.
+
+        Cognee needs provider-specific suffixes (LLM `/v1`, embedding `/api/embed`),
+        so strip any known suffix back to the host root and append `/v1`.
+        """
+        return _openai_base(self.endpoint)
 
 
 @dataclass(frozen=True)
@@ -67,8 +80,7 @@ class EmbeddingConfig:
     dimensions: int = int(os.environ.get("EMBEDDING_DIMENSIONS", "768"))
 
     def openai_base(self) -> str:
-        base = self.endpoint.rstrip("/")
-        return base if base.endswith("/v1") else f"{base}/v1"
+        return _openai_base(self.endpoint)
 
 
 LLM = LLMConfig()

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "memory-layer": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/hemanth/Documents/Cognee-project",
+        "python",
+        "-m",
+        "mcp_server.server"
+      ]
+    }
+  }
+}

@@ -44,7 +44,12 @@ CREATE TABLE IF NOT EXISTS facts (
     event_time TEXT NOT NULL,
     ingestion_time TEXT NOT NULL,
     valid_to TEXT,
-    superseded_by INTEGER
+    superseded_by INTEGER,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    tier TEXT NOT NULL DEFAULT 'hot',
+    importance REAL NOT NULL DEFAULT 0.5,
+    evicted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_facts_current
     ON facts (dataset, canonical_key, valid_to);
@@ -63,6 +68,11 @@ class Fact:
     ingestion_time: str
     valid_to: str | None
     superseded_by: int | None
+    access_count: int = 0
+    last_accessed: str | None = None
+    tier: str = "hot"
+    importance: float = 0.5
+    evicted_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +80,29 @@ class WriteResult:
     fact: Fact
     superseded: Fact | None
     changed: bool  # False when the write restates the already-current fact
+    revived_from_eviction: bool = False  # True when this key was previously evicted
+
+
+_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("access_count", "ALTER TABLE facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"),
+    ("last_accessed", "ALTER TABLE facts ADD COLUMN last_accessed TEXT"),
+    ("tier", "ALTER TABLE facts ADD COLUMN tier TEXT NOT NULL DEFAULT 'hot'"),
+    ("importance", "ALTER TABLE facts ADD COLUMN importance REAL NOT NULL DEFAULT 0.5"),
+    ("evicted_at", "ALTER TABLE facts ADD COLUMN evicted_at TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add Bucket 4 columns to a facts table created before they existed.
+
+    `CREATE TABLE IF NOT EXISTS` in `_SCHEMA` only applies to brand-new
+    databases -- an existing `.resolver_data/facts.db` from before Bucket 4
+    keeps its old column set forever unless migrated explicitly.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(facts)")}
+    for column, ddl in _MIGRATIONS:
+        if column not in existing:
+            conn.execute(ddl)
 
 
 def configure(db_path: Path | None = None) -> None:
@@ -79,6 +112,8 @@ def configure(db_path: Path | None = None) -> None:
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
+        conn.commit()
     _configured = True
 
 
@@ -114,6 +149,11 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
         ingestion_time=row["ingestion_time"],
         valid_to=row["valid_to"],
         superseded_by=row["superseded_by"],
+        access_count=row["access_count"],
+        last_accessed=row["last_accessed"],
+        tier=row["tier"],
+        importance=row["importance"],
+        evicted_at=row["evicted_at"],
     )
 
 
@@ -124,6 +164,7 @@ def write(
     text: str,
     dataset: str = "main_dataset",
     event_time: str | None = None,
+    importance: float | None = None,
 ) -> WriteResult:
     """Record a fact, superseding any conflicting current version.
 
@@ -132,11 +173,21 @@ def write(
     overwritten — it's marked `valid_to`/`superseded_by` and kept for
     history. Restating the same `(subject, relation, object)` is a no-op
     (idempotent): no new version, `changed=False`.
+
+    `importance` defaults to a neutral 0.5 when omitted — there's no real
+    importance signal wired in yet (Bucket 4), this just leaves the field
+    ready for one rather than faking a heuristic.
+
+    If the canonical key was previously evicted (Bucket 4 consolidation)
+    rather than superseded, this write is a *revival* — the system forgot
+    something that turned out to still matter. Flagged via
+    `WriteResult.revived_from_eviction` for the regret-rate metric.
     """
     _ensure_configured()
     now = datetime.now(timezone.utc).isoformat()
     event_time = event_time or now
     key = canonical_key(subject, relation)
+    fact_importance = 0.5 if importance is None else importance
 
     with _connect() as conn:
         cur = conn.execute(
@@ -153,14 +204,27 @@ def write(
         if current is not None and current.object.strip().lower() == object_.strip().lower():
             return WriteResult(fact=current, superseded=None, changed=False)
 
+        revived = False
+        if current is None:
+            cur = conn.execute(
+                """
+                SELECT * FROM facts
+                WHERE dataset = ? AND canonical_key = ? AND evicted_at IS NOT NULL
+                ORDER BY id DESC LIMIT 1
+                """,
+                (dataset, key),
+            )
+            revived = cur.fetchone() is not None
+
         cur = conn.execute(
             """
             INSERT INTO facts
                 (dataset, canonical_key, subject, relation, object, text,
-                 event_time, ingestion_time, valid_to, superseded_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                 event_time, ingestion_time, valid_to, superseded_by,
+                 access_count, last_accessed, tier, importance, evicted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, 'hot', ?, NULL)
             """,
-            (dataset, key, subject, relation, object_, text, event_time, now),
+            (dataset, key, subject, relation, object_, text, event_time, now, fact_importance),
         )
         new_id = cur.lastrowid
         new_fact = Fact(
@@ -174,6 +238,11 @@ def write(
             ingestion_time=now,
             valid_to=None,
             superseded_by=None,
+            access_count=0,
+            last_accessed=None,
+            tier="hot",
+            importance=fact_importance,
+            evicted_at=None,
         )
 
         superseded = None
@@ -193,21 +262,90 @@ def write(
                 ingestion_time=current.ingestion_time,
                 valid_to=event_time,
                 superseded_by=new_id,
+                access_count=current.access_count,
+                last_accessed=current.last_accessed,
+                tier=current.tier,
+                importance=current.importance,
+                evicted_at=current.evicted_at,
             )
         conn.commit()
 
-    return WriteResult(fact=new_fact, superseded=superseded, changed=True)
+    return WriteResult(
+        fact=new_fact, superseded=superseded, changed=True, revived_from_eviction=revived
+    )
 
 
-def current_facts(dataset: str = "main_dataset") -> list[Fact]:
-    """All currently-valid facts (not superseded) for a dataset, in write order."""
+def current_facts(dataset: str = "main_dataset", tiers: set[str] | None = None) -> list[Fact]:
+    """All currently-valid facts (not superseded, not evicted) for a dataset.
+
+    `valid_to IS NULL` already excludes evicted facts for free — `evict()`
+    stamps `valid_to` exactly like a supersede does, just with no
+    `superseded_by`. `tiers` optionally restricts to a subset (e.g. Bucket
+    4's `consolidation.resync_active()` passes `{"hot"}`); omitted means
+    all valid facts regardless of tier, so this stays backward-compatible
+    with Bucket 3's `core/ingest.py` callsite.
+    """
     _ensure_configured()
     with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM facts WHERE dataset = ? AND valid_to IS NULL ORDER BY id",
             (dataset,),
         ).fetchall()
-    return [_row_to_fact(r) for r in rows]
+    facts = [_row_to_fact(r) for r in rows]
+    if tiers is not None:
+        facts = [f for f in facts if f.tier in tiers]
+    return facts
+
+
+def record_access(fact_id: int, dataset: str = "main_dataset", now: str | None = None) -> None:
+    """Bump `access_count` and set `last_accessed` for a fact that was retrieved."""
+    _ensure_configured()
+    now = now or datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE facts SET access_count = access_count + 1, last_accessed = ?
+            WHERE id = ? AND dataset = ?
+            """,
+            (now, fact_id, dataset),
+        )
+        conn.commit()
+
+
+def set_tier(fact_id: int, tier: str, dataset: str = "main_dataset") -> None:
+    """Set a fact's consolidation tier ('hot' / 'warm' / 'cold')."""
+    _ensure_configured()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE facts SET tier = ? WHERE id = ? AND dataset = ?",
+            (tier, fact_id, dataset),
+        )
+        conn.commit()
+
+
+def evict(fact_id: int, dataset: str = "main_dataset", now: str | None = None) -> None:
+    """Physically evict a fact: stamp `valid_to`/`evicted_at`, tier -> 'cold'.
+
+    Reuses the same `valid_to` column supersede uses so `current_facts()`
+    excludes it for free, but leaves `superseded_by` NULL and sets
+    `evicted_at` so a later write to the same canonical key can be detected
+    as a *revival* (see `write()`) rather than mistaken for an ordinary
+    fresh fact. The row and its `text` are kept, not deleted — consolidation
+    in this project approximates "archival" as index-exclusion, not
+    destruction, so evicted facts remain inspectable for debugging/regret
+    analysis.
+    """
+    _ensure_configured()
+    now = now or datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE facts SET valid_to = ?, evicted_at = ?, tier = 'cold'
+            WHERE id = ? AND dataset = ?
+            """,
+            (now, now, fact_id, dataset),
+        )
+        conn.commit()
 
 
 def history(subject: str, relation: str, dataset: str = "main_dataset") -> list[Fact]:

@@ -1,11 +1,14 @@
-"""Eval set: synthetic facts + queries for recall@k and conflict-resolution
-measurement.
+"""Eval set: synthetic facts + queries for recall@k, conflict-resolution, and
+forgetting/regret measurement.
 
 `EVAL_CASES` (Bucket 2) covers stable facts for recall@k. `CONFLICT_CASES`
 (Bucket 3) covers facts that get contradicted/updated within a session, for
-the conflict-resolution-accuracy metric. Forgetting cases will be added once
-consolidation exists (Bucket 4) — each addition extends this eval set rather
-than replacing it, so recall@k stays comparable across buckets.
+the conflict-resolution-accuracy metric. `FORGET_CASES` (Bucket 4) covers
+facts that get written once, then never touched again -- candidates for the
+consolidation policy to evict -- paired with a later "revisit" so the
+regret-rate metric (was an evicted fact asked for again?) is measurable.
+Each addition extends this eval set rather than replacing it, so recall@k
+stays comparable across buckets.
 
 Each `EvalCase` pairs one or more source facts with a query and the
 substrings that must appear in a retrieved hit for that query to count as
@@ -13,6 +16,11 @@ substrings that must appear in a retrieved hit for that query to count as
 (subject, relation); `current_substrings` must appear in top-k for a
 correctly-resolved query, while `stale_substrings` (the superseded value) are
 what a naive, non-resolving baseline is expected to sometimes leak instead.
+Each `ForgetCase` is a single fact written with explicit
+(subject, relation, object) -- bypassing LLM extraction, since the
+forgetting harness needs a deterministic old `event_time` to backdate,
+not extraction-quality coverage (that's already exercised by `CONFLICT_CASES`
+via `core/ingest.py`).
 """
 
 from __future__ import annotations
@@ -35,6 +43,15 @@ class ConflictCase:
     query: str
     current_substrings: tuple[str, ...]
     stale_substrings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ForgetCase:
+    id: str
+    subject: str
+    relation: str
+    object: str
+    text: str
 
 
 EVAL_CASES: tuple[EvalCase, ...] = (
@@ -119,5 +136,30 @@ CONFLICT_CASES: tuple[ConflictCase, ...] = (
         query="Who is the current CEO of Acme Corp?",
         current_substrings=("Marcus",),
         stale_substrings=("Diana",),
+    ),
+)
+
+
+FORGET_CASES: tuple[ForgetCase, ...] = (
+    ForgetCase(
+        id="dave-hobby",
+        subject="Dave",
+        relation="hobby",
+        object="stamp collecting",
+        text="Dave's hobby is stamp collecting.",
+    ),
+    ForgetCase(
+        id="acme-old-office",
+        subject="Acme Corp",
+        relation="office_location",
+        object="Fresno",
+        text="Acme Corp's office is located in Fresno.",
+    ),
+    ForgetCase(
+        id="bob-pet-name",
+        subject="Bob",
+        relation="pet_name",
+        object="Whiskers",
+        text="Bob's pet is named Whiskers.",
     ),
 )

@@ -25,6 +25,13 @@ current value ever reaches Cognee's index) and through naive cumulative
 "does the top hit reflect the current value" accuracy is compared between
 the two. $ cost/query is intentionally still not measured (needs Bucket 5).
 
+`run_forgetting_eval()` (Bucket 4) adds eviction + regret-rate: writes each
+`FORGET_CASES` fact, simulates enough elapsed time with zero access for
+`core/consolidation.py`'s scoring to decay it into eviction range, runs a
+consolidation pass, then re-writes the same fact ("someone asks about it
+again") and checks whether the resolver correctly flags it as a revival.
+`regret_rate` = revived / evicted, reported as-is.
+
 Run: `uv run python -m benchmark.harness`
 """
 
@@ -34,12 +41,13 @@ import asyncio
 import json
 import statistics
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cognee.modules.search.types import SearchType
 
-from benchmark.eval_set import CONFLICT_CASES, EVAL_CASES
-from core import ingest, resolver, store
+from benchmark.eval_set import CONFLICT_CASES, EVAL_CASES, FORGET_CASES
+from core import consolidation, ingest, resolver, store
 from core.config import REPO_ROOT
 
 RESULTS_DIR = REPO_ROOT / "benchmark" / "results"
@@ -171,6 +179,62 @@ async def run_conflict_eval(dataset: str = "conflict_dataset", label: str = "con
     }
 
 
+async def run_forgetting_eval(dataset: str = "forget_dataset", label: str = "forgetting") -> dict:
+    """Measure consolidation's eviction + regret-rate on FORGET_CASES.
+
+    Facts are written directly via `core/resolver.py` (not
+    `ingest.remember()`) with explicit `(subject, relation, object)` --
+    this eval needs a deterministic fact to run consolidation's scoring
+    over, not extraction-quality coverage (already exercised by
+    `run_conflict_eval`).
+
+    Rather than backdating `event_time`/`ingestion_time` (which would need
+    write-time overrides not otherwise needed by the resolver), time is
+    simulated by passing a future `now` to `run_consolidation_pass` --
+    equivalent in effect (age = now - ingestion_time) without adding a
+    resolver API surface only tests would use. 60 days is comfortably past
+    the ~47-day point a never-accessed, default-importance fact decays
+    into eviction range (see `core/consolidation.py`'s EVICT_THRESHOLD
+    note).
+
+    `regret_rate` = fraction of evicted facts that were revisited (written
+    again with the same content) and correctly flagged
+    `revived_from_eviction` by the resolver. Reported as-is, not smoothed,
+    per the spec's "report honestly" instruction -- a rate of 1.0 here
+    is expected (every revisit in this synthetic set really was evicted
+    material), not a sign of a broken metric.
+    """
+    resolver.reset(dataset)
+
+    written_ids: dict[str, int] = {}
+    for case in FORGET_CASES:
+        result = resolver.write(case.subject, case.relation, case.object, case.text, dataset=dataset)
+        written_ids[case.id] = result.fact.id
+
+    future_now = datetime.now(timezone.utc) + timedelta(days=60)
+    report = consolidation.run_consolidation_pass(dataset, now=future_now)
+
+    evicted_ids = set(report.evicted_ids)
+    evicted_cases = [case for case in FORGET_CASES if written_ids[case.id] in evicted_ids]
+
+    revived_count = 0
+    for case in evicted_cases:
+        result = resolver.write(case.subject, case.relation, case.object, case.text, dataset=dataset)
+        if result.revived_from_eviction:
+            revived_count += 1
+
+    n_evicted = len(evicted_cases)
+    regret_rate = round(revived_count / n_evicted, 4) if n_evicted else 0.0
+
+    return {
+        "label": label,
+        "n_cases": len(FORGET_CASES),
+        "tier_counts": report.tier_counts,
+        "evicted_count": report.evicted_count,
+        "regret_rate": regret_rate,
+    }
+
+
 def save(result: dict) -> Path:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     path = RESULTS_DIR / f"{result['label']}.json"
@@ -188,6 +252,11 @@ async def main() -> int:
     conflict_path = save(conflict_result)
     print(json.dumps(conflict_result, indent=2))
     print(f"\nWrote {conflict_path}")
+
+    forgetting_result = await run_forgetting_eval()
+    forgetting_path = save(forgetting_result)
+    print(json.dumps(forgetting_result, indent=2))
+    print(f"\nWrote {forgetting_path}")
     return 0
 
 

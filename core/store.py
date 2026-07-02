@@ -71,3 +71,26 @@ async def reset() -> None:
     _ensure_configured()
     await cognee.prune.prune_data()
     await cognee.prune.prune_system(metadata=True)
+
+
+async def reset_and_load(dataset: str, texts: list[str], max_attempts: int = 3) -> int:
+    """Reset, add every text, and cognify, retrying the whole batch on flakiness.
+
+    Cognee's Ollama adapter hardcodes 2 structured-output retries and batches
+    every fact into one `cognify()` run, so a single flaky extraction (e.g.
+    gemma4 emitting a null field) aborts the whole batch. Retrying the full
+    reset+add+cognify cycle absorbs that. Returns the number of attempts taken
+    (1 = succeeded first try).
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        await reset()
+        for text in texts:
+            await add(text, dataset=dataset)
+        try:
+            await cognify(dataset=dataset)
+            return attempt
+        except Exception as exc:  # noqa: BLE001 - LLM structured-output flakiness
+            last_error = exc
+            print(f"  cognify attempt {attempt}/{max_attempts} failed: {exc}")
+    raise RuntimeError(f"cognify failed after {max_attempts} attempts") from last_error

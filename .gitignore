@@ -15,6 +15,9 @@ cognee_data/
 *.sqlite
 *.lance/
 
+# Resolver's bi-temporal fact store (generated data)
+.resolver_data/
+
 # Benchmark artifacts (regenerable)
 benchmark/results/*.json
 !benchmark/results/.gitkeep

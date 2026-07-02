@@ -296,6 +296,112 @@ async def run_cost_eval(label: str = "cost") -> dict:
     }
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token count: ~4 chars/token. A deliberate *estimate*, not a real
+    tokenizer -- `tiktoken`'s vocab downloads on first use, which would break
+    this project's offline guarantee, and the memory-layer's value shows up in
+    the raw-vs-extended *ratio*, which a consistent estimator captures fine.
+    Documented as an estimate the same way the cost router's pricing is
+    documented as reference-not-real.
+    """
+    return round(len(text) / 4)
+
+
+# Pre-labeled (subject, relation, object, text) facts for the LLM-free
+# storage/token evals. Three keys are updated in place (the second write to
+# "Alice"/"Atlas"/"Acme Corp" supersedes the first, exercising Bucket 3
+# versioning) and three are one-off facts (from FORGET_CASES). No extraction is
+# run -- these evals measure storage footprint, not extraction quality, so they
+# reuse deterministic triples exactly like run_forgetting_eval does.
+_VERSIONED_FACTS: tuple[tuple[str, str, str, str], ...] = (
+    ("Alice", "lives_in", "Boston", "Alice lives in Boston."),
+    ("Alice", "lives_in", "Seattle", "Alice now lives in Seattle."),
+    ("Atlas", "project_lead", "Raj", "The project lead for Atlas is Raj."),
+    ("Atlas", "project_lead", "Priya", "The project lead for Atlas is now Priya."),
+    ("Acme Corp", "ceo", "Diana", "The CEO of Acme Corp is Diana."),
+    ("Acme Corp", "ceo", "Marcus", "The CEO of Acme Corp is now Marcus."),
+) + tuple((c.subject, c.relation, c.object, c.text) for c in FORGET_CASES)
+
+
+async def run_tokens_eval(dataset: str = "tokens_dataset", label: str = "tokens") -> dict:
+    """Tokens saved by the memory layer vs. dumping raw history into context.
+
+    Writes every fact in `_VERSIONED_FACTS` (LLM-free, via `resolver.write`);
+    `raw_history_tokens` is the estimated token cost of feeding *every* fact
+    ever written into an agent's context (the no-memory-layer baseline), while
+    `extended_tokens` is the cost of only the current, non-superseded facts the
+    memory layer would actually surface. The gap is what versioning saves --
+    superseded values never re-enter context. Token counts are estimates (see
+    `_estimate_tokens`); the saved *ratio* is the honest headline.
+    """
+    resolver.reset(dataset)
+
+    raw_history_tokens = 0
+    for subject, relation, object_, text in _VERSIONED_FACTS:
+        await resolver.write(subject, relation, object_, text, dataset=dataset)
+        raw_history_tokens += _estimate_tokens(text)
+
+    current = resolver.current_facts(dataset)
+    extended_tokens = sum(_estimate_tokens(f.text) for f in current)
+    tokens_saved = raw_history_tokens - extended_tokens
+    pct_saved = round(tokens_saved / raw_history_tokens, 4) if raw_history_tokens else 0.0
+
+    return {
+        "label": label,
+        "n_writes": len(_VERSIONED_FACTS),
+        "n_current_facts": len(current),
+        "raw_history_tokens": raw_history_tokens,
+        "extended_tokens": extended_tokens,
+        "tokens_saved": tokens_saved,
+        "pct_saved": pct_saved,
+        "note": (
+            "Token counts are estimates (~4 chars/token, offline). "
+            "raw_history = every fact ever written (no-memory-layer baseline); "
+            "extended = only current non-superseded facts the memory layer surfaces."
+        ),
+    }
+
+
+async def run_storage_growth_eval(
+    dataset: str = "storage_dataset", label: str = "storage"
+) -> dict:
+    """Storage footprint over time: raw history vs. the versioned memory layer.
+
+    Writes `_VERSIONED_FACTS` one at a time; at each step records `without`
+    (cumulative writes -- the raw-history baseline that never shrinks) and
+    `with_` (current non-superseded fact count -- what the memory layer
+    actually retains). The two series diverge at each in-place update: raw
+    history keeps climbing, the memory layer plateaus. This isolates Bucket 3
+    versioning-compaction; the eviction/forgetting dimension is measured
+    separately by `run_forgetting_eval`'s regret rate, since backdating
+    per-fact ingestion time (needed to evict mid-series) isn't in the
+    resolver's API surface.
+    """
+    resolver.reset(dataset)
+
+    series: list[dict] = []
+    for i, (subject, relation, object_, text) in enumerate(_VERSIONED_FACTS, start=1):
+        await resolver.write(subject, relation, object_, text, dataset=dataset)
+        series.append(
+            {
+                "facts_ingested": i,
+                "without": i,  # raw history: every write kept
+                "with_": len(resolver.current_facts(dataset)),  # versioned: superseded dropped
+            }
+        )
+
+    return {
+        "label": label,
+        "n_writes": len(_VERSIONED_FACTS),
+        "series": series,
+        "note": (
+            "`without` = cumulative raw writes (no memory layer); `with_` = "
+            "current non-superseded facts. Divergence is Bucket 3 versioning "
+            "compaction. Eviction/forgetting is reported separately as regret rate."
+        ),
+    }
+
+
 def save(result: dict) -> Path:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     path = RESULTS_DIR / f"{result['label']}.json"
@@ -323,6 +429,16 @@ async def main() -> int:
     cost_path = save(cost_result)
     print(json.dumps(cost_result, indent=2))
     print(f"\nWrote {cost_path}")
+
+    tokens_result = await run_tokens_eval()
+    tokens_path = save(tokens_result)
+    print(json.dumps(tokens_result, indent=2))
+    print(f"\nWrote {tokens_path}")
+
+    storage_result = await run_storage_growth_eval()
+    storage_path = save(storage_result)
+    print(json.dumps(storage_result, indent=2))
+    print(f"\nWrote {storage_path}")
     return 0
 
 

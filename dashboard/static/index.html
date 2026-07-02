@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Memory Layer — Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- Chart.js vendored locally (no CDN) to keep the dashboard fully offline. -->
+  <script src="/static/vendor/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Extended Memory Layer</h1>
+    <p class="sub">Local benchmark dashboard · built over Cognee · 100% offline</p>
+  </header>
+
+  <section id="live" class="live-panel">
+    <span class="live-label">Live</span>
+    <span class="live-stat">Current facts: <strong id="live-total">—</strong></span>
+    <span class="live-stat">Hot <strong id="live-hot">—</strong></span>
+    <span class="live-stat">Warm <strong id="live-warm">—</strong></span>
+    <span class="live-stat">Cold <strong id="live-cold">—</strong></span>
+  </section>
+
+  <main class="grid">
+    <div class="card" id="card-tokens">
+      <h2>Tokens saved vs. raw history</h2>
+      <div class="headline" id="tokens-headline">—</div>
+      <p class="caption" id="tokens-caption"></p>
+      <canvas id="tokens-chart"></canvas>
+    </div>
+
+    <div class="card" id="card-conflict">
+      <h2>Conflict-resolution accuracy</h2>
+      <p class="caption">Resolver vs. naive-overwrite baseline</p>
+      <canvas id="conflict-chart"></canvas>
+    </div>
+
+    <div class="card" id="card-cost">
+      <h2>Cost per 1,000 memories</h2>
+      <div class="headline" id="cost-headline">—</div>
+      <p class="caption" id="cost-caption"></p>
+      <p class="fine-print" id="cost-note"></p>
+    </div>
+
+    <div class="card" id="card-regret">
+      <h2>Regret rate</h2>
+      <div class="headline" id="regret-headline">—</div>
+      <p class="caption">Evicted memories later requested again</p>
+    </div>
+
+    <div class="card wide" id="card-storage">
+      <h2>Storage growth over time</h2>
+      <p class="caption">Raw history vs. versioned memory layer</p>
+      <canvas id="storage-chart"></canvas>
+    </div>
+  </main>
+
+  <footer>
+    <p id="footer-note">Regenerate metrics with <code>uv run python -m benchmark.harness</code></p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

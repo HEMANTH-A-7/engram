@@ -11,9 +11,12 @@ learned it). A conflicting write never overwrites the old row — it's marked
 `valid_to`/`superseded_by` and kept for history, and a fresh row becomes the
 current version.
 
-Pure Python, no LLM calls, fully unit-testable on its own (see
-tests/test_resolver.py). `core/ingest.py` is the orchestration layer that
-extracts `(subject, relation, object)` from raw text and keeps Cognee's
+Pure Python for the common case (no LLM calls), fully unit-testable on its
+own (see tests/test_resolver.py). Since Bucket 5, `write()` makes one LLM
+call — `core/router.py`'s `judge_conflict` — but only when a conflict looks
+*ambiguous* (old/new object strings overlap); the common clean-contradiction
+case stays fully deterministic. `core/ingest.py` is the orchestration layer
+that extracts `(subject, relation, object)` from raw text and keeps Cognee's
 index in sync with `current_facts()`.
 """
 
@@ -49,7 +52,8 @@ CREATE TABLE IF NOT EXISTS facts (
     last_accessed TEXT,
     tier TEXT NOT NULL DEFAULT 'hot',
     importance REAL NOT NULL DEFAULT 0.5,
-    evicted_at TEXT
+    evicted_at TEXT,
+    summary TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_facts_current
     ON facts (dataset, canonical_key, valid_to);
@@ -73,6 +77,7 @@ class Fact:
     tier: str = "hot"
     importance: float = 0.5
     evicted_at: str | None = None
+    summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +86,7 @@ class WriteResult:
     superseded: Fact | None
     changed: bool  # False when the write restates the already-current fact
     revived_from_eviction: bool = False  # True when this key was previously evicted
+    distinct: bool = False  # True when an ambiguous conflict was judged non-conflicting
 
 
 _MIGRATIONS: tuple[tuple[str, str], ...] = (
@@ -89,6 +95,7 @@ _MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("tier", "ALTER TABLE facts ADD COLUMN tier TEXT NOT NULL DEFAULT 'hot'"),
     ("importance", "ALTER TABLE facts ADD COLUMN importance REAL NOT NULL DEFAULT 0.5"),
     ("evicted_at", "ALTER TABLE facts ADD COLUMN evicted_at TEXT"),
+    ("summary", "ALTER TABLE facts ADD COLUMN summary TEXT"),
 )
 
 
@@ -154,10 +161,25 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
         tier=row["tier"],
         importance=row["importance"],
         evicted_at=row["evicted_at"],
+        summary=row["summary"],
     )
 
 
-def write(
+def _is_ambiguous(old_object: str, new_object: str) -> bool:
+    """Cheap ambiguity proxy: is one object string a substring of the other?
+
+    Catches refinements/typos ("Boston" -> "Boston, MA") that a clean
+    contradiction check ("Boston" -> "Seattle") wouldn't flag. This is a
+    substring-overlap heuristic, not semantic similarity — most conflicts
+    (the common case) have zero string overlap and stay fully deterministic,
+    zero LLM calls, matching "routine" vs "ambiguous" from the spec text
+    directly.
+    """
+    a, b = old_object.strip().lower(), new_object.strip().lower()
+    return a != b and (a in b or b in a)
+
+
+async def write(
     subject: str,
     relation: str,
     object_: str,
@@ -173,6 +195,17 @@ def write(
     overwritten — it's marked `valid_to`/`superseded_by` and kept for
     history. Restating the same `(subject, relation, object)` is a no-op
     (idempotent): no new version, `changed=False`.
+
+    Most conflicts are clean (no string overlap between old/new object) and
+    stay fully deterministic — an unconditional supersede, no LLM call. When
+    the two object strings overlap (`_is_ambiguous`), that's a proxy for
+    "this might be a refinement or restatement, not a real change", and
+    `core/router.py`'s `judge_conflict` (Bucket 5, always the large model)
+    is asked to decide: `"update"` supersedes as normal, `"same"` is treated
+    as the idempotent no-op branch above, `"distinct"` means both values are
+    true at once — the new fact is written as a fresh current row without
+    closing the old one (`WriteResult.distinct=True`), so both remain
+    queryable rather than one incorrectly winning.
 
     `importance` defaults to a neutral 0.5 when omitted — there's no real
     importance signal wired in yet (Bucket 4), this just leaves the field
@@ -204,6 +237,16 @@ def write(
         if current is not None and current.object.strip().lower() == object_.strip().lower():
             return WriteResult(fact=current, superseded=None, changed=False)
 
+    distinct = False
+    if current is not None and _is_ambiguous(current.object, object_):
+        from core import router  # local import: avoids a resolver<->router cycle at module load
+
+        verdict = await router.judge_conflict(current.text, text)
+        if verdict == "same":
+            return WriteResult(fact=current, superseded=None, changed=False)
+        distinct = verdict == "distinct"
+
+    with _connect() as conn:
         revived = False
         if current is None:
             cur = conn.execute(
@@ -221,8 +264,8 @@ def write(
             INSERT INTO facts
                 (dataset, canonical_key, subject, relation, object, text,
                  event_time, ingestion_time, valid_to, superseded_by,
-                 access_count, last_accessed, tier, importance, evicted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, 'hot', ?, NULL)
+                 access_count, last_accessed, tier, importance, evicted_at, summary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, 'hot', ?, NULL, NULL)
             """,
             (dataset, key, subject, relation, object_, text, event_time, now, fact_importance),
         )
@@ -246,7 +289,7 @@ def write(
         )
 
         superseded = None
-        if current is not None:
+        if current is not None and not distinct:
             conn.execute(
                 "UPDATE facts SET valid_to = ?, superseded_by = ? WHERE id = ?",
                 (event_time, new_id, current.id),
@@ -271,7 +314,11 @@ def write(
         conn.commit()
 
     return WriteResult(
-        fact=new_fact, superseded=superseded, changed=True, revived_from_eviction=revived
+        fact=new_fact,
+        superseded=superseded,
+        changed=True,
+        revived_from_eviction=revived,
+        distinct=distinct,
     )
 
 
@@ -319,6 +366,17 @@ def set_tier(fact_id: int, tier: str, dataset: str = "main_dataset") -> None:
         conn.execute(
             "UPDATE facts SET tier = ? WHERE id = ? AND dataset = ?",
             (tier, fact_id, dataset),
+        )
+        conn.commit()
+
+
+def set_summary(fact_id: int, summary: str, dataset: str = "main_dataset") -> None:
+    """Persist a fact's LLM-generated summary (Bucket 5 consolidation)."""
+    _ensure_configured()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE facts SET summary = ? WHERE id = ? AND dataset = ?",
+            (summary, fact_id, dataset),
         )
         conn.commit()
 

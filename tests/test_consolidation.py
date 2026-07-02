@@ -1,8 +1,11 @@
 """Unit tests for core/consolidation.py -- tiered storage scoring + eviction.
 
-Pure Python: no LLM calls, no Ollama, no Cognee. Mirrors
-tests/test_resolver.py's pattern (isolated SQLite file per test via
-pytest's tmp_path), so this runs in the fast default suite.
+No Ollama, no Cognee. Mirrors tests/test_resolver.py's pattern (isolated
+SQLite file per test via pytest's tmp_path), so this runs in the fast
+default suite. `resolver.write()` and `run_consolidation_pass()` are both
+`async def` since Bucket 5 -- every `run_consolidation_pass` call below
+passes `summarize=False` to skip the LLM summarization path and stay
+LLM-free, consistent with this file's fast/offline scope.
 """
 
 from __future__ import annotations
@@ -106,48 +109,56 @@ def test_tier_boundaries():
 # ---- run_consolidation_pass / eviction -------------------------------------
 
 
-def test_fresh_fact_stays_hot(tmp_path):
+@pytest.mark.asyncio
+async def test_fresh_fact_stays_hot(tmp_path):
     _fresh(tmp_path)
-    resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
 
-    report = consolidation.run_consolidation_pass("main_dataset")
+    report = await consolidation.run_consolidation_pass("main_dataset", summarize=False)
 
     assert report.tier_counts == {"hot": 1, "warm": 0, "cold": 0}
     assert report.evicted_count == 0
     assert resolver.current_facts()[0].tier == "hot"
 
 
-def test_never_accessed_fact_evicted_after_enough_simulated_time(tmp_path):
+@pytest.mark.asyncio
+async def test_never_accessed_fact_evicted_after_enough_simulated_time(tmp_path):
     _fresh(tmp_path)
-    written = resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    written = await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
 
     future = datetime.now(timezone.utc) + timedelta(days=60)
-    report = consolidation.run_consolidation_pass("main_dataset", now=future)
+    report = await consolidation.run_consolidation_pass(
+        "main_dataset", now=future, summarize=False
+    )
 
     assert report.evicted_ids == (written.fact.id,)
     assert report.tier_counts["cold"] == 1
     assert resolver.current_facts() == []
 
 
-def test_consolidation_pass_is_idempotent(tmp_path):
+@pytest.mark.asyncio
+async def test_consolidation_pass_is_idempotent(tmp_path):
     _fresh(tmp_path)
-    resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
 
     now = datetime.now(timezone.utc)
-    first = consolidation.run_consolidation_pass("main_dataset", now=now)
-    second = consolidation.run_consolidation_pass("main_dataset", now=now)
+    first = await consolidation.run_consolidation_pass("main_dataset", now=now, summarize=False)
+    second = await consolidation.run_consolidation_pass("main_dataset", now=now, summarize=False)
 
     assert first.tier_counts == second.tier_counts
     assert first.evicted_ids == second.evicted_ids
 
 
-def test_accessed_fact_resists_eviction_longer(tmp_path):
+@pytest.mark.asyncio
+async def test_accessed_fact_resists_eviction_longer(tmp_path):
     _fresh(tmp_path)
-    written = resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    written = await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
     resolver.record_access(written.fact.id)
 
     future = datetime.now(timezone.utc) + timedelta(days=60)
-    report = consolidation.run_consolidation_pass("main_dataset", now=future)
+    report = await consolidation.run_consolidation_pass(
+        "main_dataset", now=future, summarize=False
+    )
 
     # record_access bumped access_count to 1, and this is the only fact in
     # the dataset so it's also max_access_count=1 -- full frequency score
@@ -160,15 +171,16 @@ def test_accessed_fact_resists_eviction_longer(tmp_path):
 # ---- revived_from_eviction / regret detection ------------------------------
 
 
-def test_revival_flag_set_when_rewriting_an_evicted_fact(tmp_path):
+@pytest.mark.asyncio
+async def test_revival_flag_set_when_rewriting_an_evicted_fact(tmp_path):
     _fresh(tmp_path)
-    resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
 
     future = datetime.now(timezone.utc) + timedelta(days=60)
-    consolidation.run_consolidation_pass("main_dataset", now=future)
+    await consolidation.run_consolidation_pass("main_dataset", now=future, summarize=False)
     assert resolver.current_facts() == []
 
-    revival = resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    revival = await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
 
     assert revival.revived_from_eviction is True
     assert revival.changed is True
@@ -176,17 +188,21 @@ def test_revival_flag_set_when_rewriting_an_evicted_fact(tmp_path):
     assert len(resolver.current_facts()) == 1
 
 
-def test_revival_flag_false_for_a_genuinely_new_fact(tmp_path):
+@pytest.mark.asyncio
+async def test_revival_flag_false_for_a_genuinely_new_fact(tmp_path):
     _fresh(tmp_path)
-    result = resolver.write("Bob", "favorite_color", "green", "Bob's favorite color is green.")
+    result = await resolver.write(
+        "Bob", "favorite_color", "green", "Bob's favorite color is green."
+    )
 
     assert result.revived_from_eviction is False
 
 
-def test_revival_flag_false_for_an_ordinary_supersede(tmp_path):
+@pytest.mark.asyncio
+async def test_revival_flag_false_for_an_ordinary_supersede(tmp_path):
     _fresh(tmp_path)
-    resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
-    second = resolver.write("Alice", "lives_in", "Seattle", "Alice moved to Seattle.")
+    await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    second = await resolver.write("Alice", "lives_in", "Seattle", "Alice moved to Seattle.")
 
     assert second.revived_from_eviction is False
     assert second.superseded is not None
@@ -195,10 +211,11 @@ def test_revival_flag_false_for_an_ordinary_supersede(tmp_path):
 # ---- current_facts(tiers=...) filtering ------------------------------------
 
 
-def test_current_facts_tier_filter(tmp_path):
+@pytest.mark.asyncio
+async def test_current_facts_tier_filter(tmp_path):
     _fresh(tmp_path)
-    a = resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
-    b = resolver.write("Bob", "favorite_color", "green", "Bob's favorite color is green.")
+    a = await resolver.write("Alice", "lives_in", "Boston", "Alice lives in Boston.")
+    b = await resolver.write("Bob", "favorite_color", "green", "Bob's favorite color is green.")
     resolver.set_tier(b.fact.id, "warm")
 
     hot_only = resolver.current_facts("main_dataset", tiers={"hot"})

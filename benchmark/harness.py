@@ -47,7 +47,7 @@ from pathlib import Path
 from cognee.modules.search.types import SearchType
 
 from benchmark.eval_set import CONFLICT_CASES, EVAL_CASES, FORGET_CASES
-from core import consolidation, ingest, resolver, store
+from core import consolidation, ingest, resolver, router, store
 from core.config import REPO_ROOT
 
 RESULTS_DIR = REPO_ROOT / "benchmark" / "results"
@@ -208,18 +208,24 @@ async def run_forgetting_eval(dataset: str = "forget_dataset", label: str = "for
 
     written_ids: dict[str, int] = {}
     for case in FORGET_CASES:
-        result = resolver.write(case.subject, case.relation, case.object, case.text, dataset=dataset)
+        result = await resolver.write(
+            case.subject, case.relation, case.object, case.text, dataset=dataset
+        )
         written_ids[case.id] = result.fact.id
 
     future_now = datetime.now(timezone.utc) + timedelta(days=60)
-    report = consolidation.run_consolidation_pass(dataset, now=future_now)
+    # summarize=False: this eval measures eviction + regret-rate, not cost
+    # (that's run_cost_eval's job) -- skip the extra LLM calls.
+    report = await consolidation.run_consolidation_pass(dataset, now=future_now, summarize=False)
 
     evicted_ids = set(report.evicted_ids)
     evicted_cases = [case for case in FORGET_CASES if written_ids[case.id] in evicted_ids]
 
     revived_count = 0
     for case in evicted_cases:
-        result = resolver.write(case.subject, case.relation, case.object, case.text, dataset=dataset)
+        result = await resolver.write(
+            case.subject, case.relation, case.object, case.text, dataset=dataset
+        )
         if result.revived_from_eviction:
             revived_count += 1
 
@@ -232,6 +238,61 @@ async def run_forgetting_eval(dataset: str = "forget_dataset", label: str = "for
         "tier_counts": report.tier_counts,
         "evicted_count": report.evicted_count,
         "regret_rate": regret_rate,
+    }
+
+
+async def run_cost_eval(label: str = "cost") -> dict:
+    """Route every EVAL_CASES fact through the router and report cost.
+
+    Resets `router._ledger` first so this call's numbers aren't polluted by
+    extraction done earlier in the same process (e.g. `run()` or
+    `run_conflict_eval()`, which go through `core/ingest.py` -> the same
+    router). Calls `router.route_extract_triple` directly rather than
+    `ingest.remember()` -- this eval only cares about extraction cost, not
+    resolver versioning, so every fact gets a fresh cascade attempt with no
+    resolver state to skew it.
+
+    `escalated_to_large_rate` is the router's headline "how much did the
+    cascade actually save" number: the fraction of facts that needed the
+    large model at all (small-model phase never succeeded for them).
+    `large_only_reference_cost_usd` approximates what this run would have
+    cost with no cascade -- every fact sent straight to the large model --
+    using this run's own observed average large-tier token count per call
+    (falling back to the small-tier average if the large model was never
+    actually invoked, i.e. the cascade never needed to escalate).
+    """
+    router.reset_ledger()
+    all_facts = [fact for case in EVAL_CASES for fact in case.facts]
+
+    for text in all_facts:
+        try:
+            await router.route_extract_triple(text)
+        except RuntimeError as exc:
+            print(f"  [cost eval] extraction failed for {text!r}: {exc}")
+
+    report = router.cost_report()
+    small = report["by_tier"]["small"]
+    large = report["by_tier"]["large"]
+    n_facts = len(all_facts)
+
+    if large["calls"]:
+        avg_large_tokens = (large["prompt_tokens"] + large["completion_tokens"]) / large["calls"]
+    elif small["calls"]:
+        avg_large_tokens = (small["prompt_tokens"] + small["completion_tokens"]) / small["calls"]
+    else:
+        avg_large_tokens = 0.0
+    large_only_cost = (
+        avg_large_tokens * n_facts / 1_000_000 * router._PRICE_PER_M_TOKENS["large"]
+    )
+
+    return {
+        "label": label,
+        "n_facts": n_facts,
+        "cost_report": report,
+        "small_model_success_rate": round(small["successes"] / n_facts, 4) if n_facts else 0.0,
+        "escalated_to_large_rate": round(large["successes"] / n_facts, 4) if n_facts else 0.0,
+        "large_only_reference_cost_usd": round(large_only_cost, 6),
+        "cascade_savings_usd": round(large_only_cost - report["total_cost_usd"], 6),
     }
 
 
@@ -257,6 +318,11 @@ async def main() -> int:
     forgetting_path = save(forgetting_result)
     print(json.dumps(forgetting_result, indent=2))
     print(f"\nWrote {forgetting_path}")
+
+    cost_result = await run_cost_eval()
+    cost_path = save(cost_result)
+    print(json.dumps(cost_result, indent=2))
+    print(f"\nWrote {cost_path}")
     return 0
 
 

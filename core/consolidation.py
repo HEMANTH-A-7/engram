@@ -9,11 +9,17 @@ and `core/store.py` (Cognee's index, rebuilt from only the hot tier).
 Two honest simplifications vs. a "real" implementation, worth stating up
 front rather than letting them surprise a reader later:
 
-- **"Compression" here means index exclusion, not summarization.** Warm and
-  cold facts keep their full text in `resolver.db` — nothing is deleted
-  until eviction — but are excluded from Cognee's active search index.
-  True compression would need another LLM pass over the text; out of scope
-  for this bucket given the project's offline/cost-aware design.
+- **"Compression" here means index exclusion, not summarization** for the
+  warm tier. Warm facts keep their full text in `resolver.db` and are
+  excluded from Cognee's active search index, nothing more. Cold-tier facts
+  get one step further (Bucket 5): the first time a fact transitions to
+  `"cold"`, `run_consolidation_pass` calls `core/router.py`'s
+  `summarize_fact` (always the large model — this is the spec's
+  "consolidation summarization" path) and persists the result via
+  `resolver.set_summary()`. That's still not re-run on every pass (a fact
+  that's already cold and already summarized is left alone), and the
+  summary is stored alongside the full text, not instead of it — nothing is
+  destroyed until eviction.
 - **"Background job" here means an explicitly-invoked function, not a
   daemon.** This project has no persistent service until the MCP server
   (Bucket 6) / dashboard (Bucket 7). `run_consolidation_pass()` is the
@@ -34,7 +40,7 @@ from datetime import datetime, timezone
 
 from cognee.modules.search.types import SearchType
 
-from core import resolver, store
+from core import resolver, router, store
 
 # Scoring weights (sum to 1.0) and thresholds. Tunable; defaults favor
 # recency, matching the intuition that a memory system should prioritize
@@ -103,13 +109,26 @@ class ConsolidationReport:
         return len(self.evicted_ids)
 
 
-def run_consolidation_pass(dataset: str = "main_dataset", now: datetime | None = None) -> ConsolidationReport:
+async def run_consolidation_pass(
+    dataset: str = "main_dataset",
+    now: datetime | None = None,
+    summarize: bool = True,
+) -> ConsolidationReport:
     """Rescore every current fact, reassign its tier, evict what scores under EVICT_THRESHOLD.
 
     Stateless and idempotent: every pass recomputes tier from scratch off
     `access_count`/`last_accessed`/`importance` rather than tracking "how
     long has this been cold" separately, so running it twice in a row with
     no activity in between produces the same result.
+
+    `summarize=True` (default) calls `core/router.py`'s `summarize_fact`
+    (Bucket 5, always the large model) the first time a fact's tier resolves
+    to `"cold"` this pass (whether or not it's also evicted) and it doesn't
+    already have a `summary` — this is the spec's "consolidation
+    summarization" path, and the "first time / not already summarized"
+    check keeps a repeatedly-cold, never-touched fact from being
+    re-summarized every pass. Pass `summarize=False` to skip it (e.g. for
+    fast/offline tests, or evals that aren't measuring cost).
     """
     now = now or datetime.now(timezone.utc)
     facts = resolver.current_facts(dataset)
@@ -128,6 +147,10 @@ def run_consolidation_pass(dataset: str = "main_dataset", now: datetime | None =
         else:
             resolver.set_tier(fact.id, tier, dataset=dataset)
             tier_counts[tier] += 1
+
+        if summarize and tier == "cold" and fact.summary is None:
+            summary = await router.summarize_fact(fact.text)
+            resolver.set_summary(fact.id, summary, dataset=dataset)
 
     return ConsolidationReport(
         dataset=dataset, tier_counts=tier_counts, evicted_ids=tuple(evicted_ids)

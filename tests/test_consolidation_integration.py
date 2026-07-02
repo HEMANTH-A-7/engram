@@ -48,7 +48,7 @@ async def test_evicted_fact_becomes_unsearchable_and_revival_restores_it():
     dataset = "test_consolidation_dataset"
     resolver.reset(dataset)
 
-    written = resolver.write(
+    written = await resolver.write(
         "Carol", "hobby", "pottery", "Carol's hobby is pottery.", dataset=dataset
     )
     await consolidation.resync_active(dataset)
@@ -57,7 +57,7 @@ async def test_evicted_fact_becomes_unsearchable_and_revival_restores_it():
     assert "pottery" in joined, f"fact missing before eviction: {joined!r}"
 
     future = datetime.now(timezone.utc) + timedelta(days=60)
-    report = consolidation.run_consolidation_pass(dataset, now=future)
+    report = await consolidation.run_consolidation_pass(dataset, now=future)
     assert written.fact.id in report.evicted_ids
     assert resolver.current_facts(dataset) == []
 
@@ -65,7 +65,7 @@ async def test_evicted_fact_becomes_unsearchable_and_revival_restores_it():
     joined = await _search_text("What is Carol's hobby?", dataset)
     assert "pottery" not in joined, f"evicted fact still searchable: {joined!r}"
 
-    revival = resolver.write(
+    revival = await resolver.write(
         "Carol", "hobby", "pottery", "Carol's hobby is pottery.", dataset=dataset
     )
     assert revival.revived_from_eviction is True

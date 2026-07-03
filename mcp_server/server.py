@@ -34,12 +34,11 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
 
 from cognee.modules.retrieval.exceptions.exceptions import NoDataError
 from mcp.server.fastmcp import FastMCP
 
-from core import consolidation, ingest, resolver, router, store
+from core import consolidation, ingest, resolver, router
 from core.config import REPO_ROOT
 
 RESULTS_DIR = REPO_ROOT / "benchmark" / "results"

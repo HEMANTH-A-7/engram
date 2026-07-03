@@ -106,7 +106,16 @@ function renderRegret(forgetting) {
   if (!forgetting) return markMissing("card-regret");
   const el = document.getElementById("regret-headline");
   el.textContent = pct(forgetting.regret_rate);
-  el.style.color = forgetting.regret_rate > 0.25 ? COLORS.danger : COLORS.accent2;
+  // High regret here is by construction (see note), so warn rather than danger.
+  el.style.color = forgetting.regret_rate > 0.25 ? COLORS.warn : COLORS.accent2;
+  const n = forgetting.evicted_count ?? forgetting.n_cases ?? 0;
+  const note = document.getElementById("regret-note");
+  if (note) {
+    note.textContent =
+      `Synthetic stress test (n=${n}): every evicted fact is deliberately ` +
+      `re-requested, so 100% confirms the revival path fires — not a ` +
+      `production regret signal.`;
+  }
 }
 
 function renderStorage(storage) {

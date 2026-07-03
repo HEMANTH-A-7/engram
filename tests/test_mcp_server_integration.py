@@ -18,6 +18,9 @@ Two layers of proof:
 
 from __future__ import annotations
 
+import json
+from datetime import timedelta
+
 import pytest
 
 from mcp import ClientSession, StdioServerParameters
@@ -73,3 +76,85 @@ async def test_server_advertises_all_four_tools_over_stdio():
 
     names = {t.name for t in result.tools}
     assert {"memory_write", "memory_search", "memory_stats", "memory_forget"} <= names
+
+
+def _tool_payload(result) -> dict:
+    """Extract a tool's dict return from a CallToolResult, asserting the wire held.
+
+    The whole point of this round-trip is that the JSON-RPC channel stayed
+    clean, so we assert the protocol-level success flag and that the content
+    block parses as JSON -- a corrupted wire shows up as either an exception
+    before we get here or a malformed/absent content block.
+    """
+    assert result.isError is False, f"tool call reported an error: {result.content!r}"
+    assert result.content, "tool returned no content blocks"
+    text = getattr(result.content[0], "text", None)
+    assert text is not None, f"expected a text content block, got {result.content[0]!r}"
+    return json.loads(text)
+
+
+@pytest.mark.asyncio
+async def test_memory_write_round_trip_keeps_the_wire_clean():
+    """A real stdio client must survive memory_write, which runs cognify().
+
+    This is the regression test for commit 0332cd7. memory_write is the tool
+    that drives Cognee's cognify(), whose DB layer prints chatter ("table
+    already exists, skipping creation") to stdout -- the exact stream MCP
+    carries JSON-RPC on. Before the fix, a real stdio client rejected that
+    chatter with a JSONRPCMessage ValidationError mid-write; the in-process
+    tests above and the list_tools handshake never triggered a cognify(), so
+    they couldn't catch it. Only a real-client call_tool("memory_write", ...)
+    exercises the corruptible path.
+
+    It's slow (~40s) and can hit gemma4's documented cognify flakiness, so we
+    use a generous per-call timeout and tolerate a single retry. A genuine
+    wire-corruption bug is deterministic (every cognify prints), so it fails
+    both attempts; a flake usually clears on the retry. We assert only that
+    the protocol survived and the payload shape is valid, never on the exact
+    extracted values.
+
+    Honesty caveat (verified 2026-07-03): this is a guard *by construction* --
+    a real stdio client parses and validates every line on the wire, so any
+    non-JSON-RPC byte written to the server's stdout during a tool call breaks
+    it. It is NOT a demonstrated red->green for 0332cd7 in the current stack:
+    reverting main() to `mcp.run(transport="stdio")` and re-running this test
+    (warm, cold, single write, and full write/search/stats/forget) all stayed
+    green, because Cognee 1.2.2 emits its DB chatter to *stderr*, not stdout,
+    on these paths. The fix remains correct defense-in-depth; this test catches
+    any reintroduction of stdout leakage regardless of which dependency causes
+    it.
+    """
+    dataset = "test_mcp_stdio_write"
+    resolver.reset(dataset)
+
+    params = StdioServerParameters(
+        command="uv",
+        args=["run", "--directory", str(REPO_ROOT), "python", "-m", "mcp_server.server"],
+    )
+
+    last_error: Exception | None = None
+    for _attempt in range(2):  # tolerate one gemma4 flake; a wire bug fails both
+        try:
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        "memory_write",
+                        {
+                            "content": "Alice lives in Boston.",
+                            "metadata": {"dataset": dataset},
+                        },
+                        read_timeout_seconds=timedelta(seconds=180),
+                    )
+            payload = _tool_payload(result)
+            assert isinstance(payload.get("subject"), str) and payload["subject"].strip()
+            assert isinstance(payload["changed"], bool)
+            return  # clean round-trip through a cognify() -- the wire held
+        except Exception as exc:  # noqa: BLE001 -- retry once, then surface it
+            last_error = exc
+            resolver.reset(dataset)
+
+    raise AssertionError(
+        "memory_write stdio round-trip failed on both attempts; "
+        f"last error: {last_error!r}"
+    )

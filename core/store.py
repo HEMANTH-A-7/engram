@@ -11,7 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import cognee
+from cognee.api.v1.cognify.cognify import extract_graph_and_summarize, get_default_tasks
 from cognee.modules.cognify.config import get_cognify_config
+from cognee.modules.cognify.rollback import cognify_rollback_handler
+from cognee.modules.pipelines import run_pipeline
+from cognee.modules.pipelines.layers.pipeline_execution_mode import get_pipeline_executor
 from cognee.modules.search.types import SearchType
 from cognee.shared.data_models import KnowledgeGraph, Node as _CogneeNode
 from pydantic import BaseModel, Field, field_validator
@@ -132,6 +136,55 @@ async def cognify(dataset: str = "main_dataset") -> None:
     await cognee.cognify(datasets=[dataset], graph_model=LenientKnowledgeGraph)
 
 
+def _embed_only_tasks(tasks: list):
+    """Drop the slow ``extract_graph_and_summarize`` task from a default task list.
+
+    Everything else (classify -> chunk -> ``add_data_points``) is kept, so raw
+    ``DocumentChunk``s are still embedded and persisted for CHUNKS retrieval.
+    Split out from :func:`cognify_embed_only` so the filter is unit-testable
+    without paying the LLM pipeline.
+    """
+    return [t for t in tasks if t.executable is not extract_graph_and_summarize]
+
+
+async def cognify_embed_only(dataset: str = "main_dataset") -> None:
+    """Cognify for CHUNKS retrieval only, skipping the slow graph+summarize task.
+
+    Cognee's public ``cognify()`` runs a fixed 5-task pipeline; exactly one task,
+    ``extract_graph_and_summarize``, is expensive (two gemma4 LLM passes, minutes
+    per batch on CPU Ollama) -- and every retrieval path in this layer uses
+    ``SearchType.CHUNKS``, which never touches the graph or summaries that task
+    produces. So it is pure dead weight for writes: dropping it is the single
+    biggest write-latency win (proven spike: ~1.3s vs. minutes).
+
+    ``cognee.cognify()`` exposes no ``tasks=`` parameter, so we rebuild the
+    default task list, filter out that one task, and drive Cognee's *internal*
+    ``run_pipeline`` ourselves via the same executor ``cognify()`` uses. This is
+    deliberate deeper coupling into Cognee internals (``get_default_tasks`` /
+    ``run_pipeline`` / ``get_pipeline_executor``) in exchange for the speedup;
+    the remaining tasks (classify -> chunk -> ``add_data_points``) still embed
+    and persist the raw ``DocumentChunk``s, which is what CHUNKS search returns.
+    ``cognify()`` is kept for the GRAPH_COMPLETION baseline demo.
+    """
+    _ensure_configured()
+    tasks = await get_default_tasks(graph_model=LenientKnowledgeGraph)
+    kept = _embed_only_tasks(tasks)
+    executor = get_pipeline_executor(run_in_background=False)
+    await executor(
+        pipeline=run_pipeline,
+        tasks=kept,
+        user=None,
+        datasets=[dataset],
+        vector_db_config=None,
+        graph_db_config=None,
+        incremental_loading=True,
+        use_pipeline_cache=False,
+        pipeline_name="cognify_pipeline",
+        data_per_batch=20,
+        rollback_handler=cognify_rollback_handler,
+    )
+
+
 async def search(
     query: str,
     k: int = 5,
@@ -155,7 +208,9 @@ async def reset() -> None:
     await cognee.prune.prune_system(metadata=True)
 
 
-async def reset_and_load(dataset: str, texts: list[str], max_attempts: int = 3) -> int:
+async def reset_and_load(
+    dataset: str, texts: list[str], max_attempts: int = 3, graph: bool = False
+) -> int:
     """Reset, add every text, and cognify, retrying the whole batch on flakiness.
 
     Cognee's Ollama adapter hardcodes 2 structured-output retries and batches
@@ -163,6 +218,12 @@ async def reset_and_load(dataset: str, texts: list[str], max_attempts: int = 3) 
     gemma4 emitting a null field) aborts the whole batch. Retrying the full
     reset+add+cognify cycle absorbs that. Returns the number of attempts taken
     (1 = succeeded first try).
+
+    ``graph`` defaults to ``False``: the memory-layer write/resync paths only
+    ever retrieve with ``SearchType.CHUNKS``, so they take the fast
+    :func:`cognify_embed_only` path (no graph+summarize LLM passes). Callers that
+    need the full knowledge graph (e.g. the GRAPH_COMPLETION baseline demo) pass
+    ``graph=True`` to run the complete :func:`cognify` pipeline.
     """
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
@@ -170,7 +231,10 @@ async def reset_and_load(dataset: str, texts: list[str], max_attempts: int = 3) 
         for text in texts:
             await add(text, dataset=dataset)
         try:
-            await cognify(dataset=dataset)
+            if graph:
+                await cognify(dataset=dataset)
+            else:
+                await cognify_embed_only(dataset=dataset)
             return attempt
         except Exception as exc:  # noqa: BLE001 - LLM structured-output flakiness
             last_error = exc

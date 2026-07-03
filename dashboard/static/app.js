@@ -161,6 +161,24 @@ function renderLive(stats) {
   document.getElementById("live-cold").textContent = f.by_tier.cold;
 }
 
+// Poll interval for the live header (ms). Charts are NOT re-fetched here:
+// the results JSONs only change on a benchmark-harness run, and re-rendering
+// Chart.js on a timer would leak canvases. Only /api/stats moves live.
+const LIVE_POLL_MS = 4000;
+
+// Fetch only the live resolver/router state and refresh the header. Safe to
+// call on a timer (no Chart.js work). Silently ignores transient fetch errors
+// so a blip doesn't clobber the last-known-good header.
+async function loadStats() {
+  try {
+    const stats = await fetch("/api/stats").then((r) => r.json());
+    renderLive(stats);
+  } catch (err) {
+    /* keep last-known-good live values on a transient failure */
+  }
+}
+
+// One-shot: draw the charts (from saved benchmark JSON) + seed the live header.
 async function load() {
   try {
     const [results, stats] = await Promise.all([
@@ -181,3 +199,4 @@ async function load() {
 }
 
 load();
+setInterval(loadStats, LIVE_POLL_MS);

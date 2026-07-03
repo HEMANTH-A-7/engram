@@ -91,9 +91,9 @@ with an underscore; the exposed tool names are identical across all clients.)
 | Tool | Signature | Purpose |
 |------|-----------|---------|
 | `memory_write` | `(content: str, metadata?: dict)` | Extract a triple, version it bi-temporally, reindex. `metadata` may carry `dataset`, `event_time`. |
-| `memory_search` | `(query: str, k=5, dataset="main_dataset")` | Ranked retrieval; records access (feeds tiering). |
+| `memory_search` | `(query: str, k=5, dataset="main_dataset")` | Ranked retrieval; records access (feeds tiering). Returns `hits` (texts) plus index-aligned `hit_facts` (`{id, subject, relation, object, text}`) — the `id` is what `memory_forget` needs. |
 | `memory_stats` | `(dataset="main_dataset")` | Live fact counts by tier + cost report + saved benchmark results. |
-| `memory_forget` | `(id: int, dataset="main_dataset")` | Evict a fact by id and drop it from the index. |
+| `memory_forget` | `(id: int, dataset="main_dataset")` | Evict a fact by id and drop it from the index. Get the `id` from `memory_search`'s `hit_facts`. |
 
 ## Smoke test
 

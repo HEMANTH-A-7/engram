@@ -107,18 +107,41 @@ async def memory_search(query: str, k: int = 5, dataset: str = "main_dataset") -
     Uses the consolidation-aware search path (not raw Cognee search), so a
     retrieved fact's access stats are bumped -- retrieval keeps a memory
     "warm" and resistant to eviction, exactly as a real memory system should.
-    Returns the ranked hit texts.
+
+    Returns two views of the same ranked results, index-aligned:
+      - `hits`: the ranked hit texts (unchanged legacy shape).
+      - `hit_facts`: one object per hit, `{id, subject, relation, object,
+        text}`. The `id` is what `memory_forget` needs, so a client can
+        search and then forget a specific result without any out-of-band id
+        lookup. Cognee doesn't carry resolver ids through its own pipeline,
+        so we recover them by exact-text match against current facts (the
+        index stores exactly `Fact.text`, 1:1). If a hit text can't be
+        mapped back -- an anomaly, not the norm -- its `id` is `null` and the
+        client simply can't forget that one by id; we surface that honestly
+        rather than guess.
 
     An empty index (e.g. every fact evicted, or nothing written yet) raises
     Cognee's `NoDataError` rather than returning no hits -- for an
     agent-facing tool that's just "no results," so it's caught and reported
-    as an empty list, not surfaced as a tool error.
+    as empty lists, not surfaced as a tool error.
     """
     try:
         hits = await consolidation.search(query, dataset=dataset, k=k)
     except NoDataError:
-        return {"query": query, "hits": []}
-    return {"query": query, "hits": [consolidation._hit_text(h) for h in hits]}
+        return {"query": query, "hits": [], "hit_facts": []}
+
+    texts = [consolidation._hit_text(h) for h in hits]
+    by_text = {f.text: f for f in resolver.current_facts(dataset)}
+    hit_facts = []
+    for text in texts:
+        summary = _fact_summary(by_text.get(text)) or {
+            "id": None,
+            "subject": None,
+            "relation": None,
+            "object": None,
+        }
+        hit_facts.append({**summary, "text": text})
+    return {"query": query, "hits": texts, "hit_facts": hit_facts}
 
 
 @mcp.tool()
@@ -155,6 +178,9 @@ async def memory_stats(dataset: str = "main_dataset") -> dict:
 @mcp.tool()
 async def memory_forget(id: int, dataset: str = "main_dataset") -> dict:
     """Evict a fact by id and drop it from the search index.
+
+    The `id` comes from `memory_search`'s `hit_facts[*].id` -- that's how a
+    client discovers what to forget without an out-of-band lookup.
 
     Looks the id up among currently-valid facts first: a miss returns
     `{found: false}` and touches nothing (no Cognee call). A hit evicts the

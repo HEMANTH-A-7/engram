@@ -102,4 +102,50 @@ async def test_memory_search_returns_serializable_shape_on_empty_index(tmp_path,
 
     assert result["query"] == "Where does Alice live?"
     assert result["hits"] == ["Alice lives in Boston."]
+    # hit_facts is index-aligned with hits; with an empty resolver the hit
+    # text can't be mapped back to a fact, so id is null (the honest anomaly
+    # path) -- but the text is still echoed so the shape stays uniform.
+    assert result["hit_facts"] == [
+        {
+            "id": None,
+            "subject": None,
+            "relation": None,
+            "object": None,
+            "text": "Alice lives in Boston.",
+        }
+    ]
+    json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_memory_search_hit_facts_carry_ids_for_forget(tmp_path, monkeypatch):
+    """The id a client feeds to memory_forget is discoverable from a search.
+
+    Seeds a real fact in the resolver, stubs the Cognee search to return that
+    fact's exact text (the 1:1 indexing invariant), and asserts the hit is
+    resolved back to its id + triple -- no Ollama, no Cognee. The forget
+    round-trip that consumes this id is covered in the integration suite.
+    """
+    _fresh(tmp_path)
+    written = await resolver.write(
+        "Alice", "lives_in", "Boston", "Alice lives in Boston."
+    )
+
+    async def _fake_search(query, dataset="main_dataset", k=5):
+        return ["Alice lives in Boston."]
+
+    monkeypatch.setattr(server.consolidation, "search", _fake_search)
+
+    result = await server.memory_search("Where does Alice live?", k=3)
+
+    assert result["hits"] == ["Alice lives in Boston."]
+    assert result["hit_facts"] == [
+        {
+            "id": written.fact.id,
+            "subject": "Alice",
+            "relation": "lives_in",
+            "object": "Boston",
+            "text": "Alice lives in Boston.",
+        }
+    ]
     json.dumps(result)

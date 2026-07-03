@@ -48,12 +48,20 @@ async def test_write_search_stats_forget_end_to_end():
     found = await server.memory_search("Where does Alice live?", k=3, dataset=dataset)
     joined = " ".join(found["hits"]).lower()
     assert "boston" in joined, f"written fact not searchable: {found['hits']!r}"
+    # hit_facts is index-aligned with hits and carries the id a client needs.
+    assert len(found["hit_facts"]) == len(found["hits"])
+    assert all(hf["text"] == t for hf, t in zip(found["hit_facts"], found["hits"]))
 
     stats = await server.memory_stats(dataset)
     assert stats["facts"]["total_current"] >= 1
     assert stats["cost"]["total_calls"] >= 1  # the write ran at least one extract
 
-    fact_id = resolver.current_facts(dataset)[0].id
+    # Discover the id the way a real client must -- from the search hit itself,
+    # not by reaching into the resolver -- then forget it. This is the whole
+    # point of hit_facts: memory_search -> memory_forget with no side channel.
+    boston_hit = next(hf for hf in found["hit_facts"] if "boston" in hf["text"].lower())
+    fact_id = boston_hit["id"]
+    assert fact_id is not None, f"hit did not resolve to an id: {boston_hit!r}"
     forgotten = await server.memory_forget(fact_id, dataset=dataset)
     assert forgotten["found"] is True
     assert forgotten["evicted_id"] == fact_id

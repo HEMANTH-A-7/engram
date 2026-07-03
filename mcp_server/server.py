@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 from pathlib import Path
 
 from cognee.modules.retrieval.exceptions.exceptions import NoDataError
@@ -173,8 +175,41 @@ async def memory_forget(id: int, dataset: str = "main_dataset") -> dict:
 
 
 def main() -> None:
-    """Entry point: run the server on stdio (blocks until the client detaches)."""
-    mcp.run(transport="stdio")
+    """Entry point: run the server on stdio (blocks until the client detaches).
+
+    MCP's stdio transport carries the JSON-RPC wire on **stdout**, so anything
+    else that writes to stdout corrupts it. Cognee's DB layer emits chatter to
+    stdout during `cognify()` (e.g. "table already exists, skipping creation"),
+    which a real stdio client rejects as invalid JSON-RPC -- a failure the
+    in-process tests can't surface. Fix: hand the MCP writer a *private*
+    duplicate of the real stdout, then point the process's own stdout at
+    stderr, both at the fd level (`dup2(2, 1)` catches raw/handler writes to
+    fd 1 regardless of any cached stream reference) and the Python level
+    (`sys.stdout = sys.stderr` catches `print`). Only the protocol writer keeps
+    a path to the real stdout.
+    """
+    import anyio
+    from io import TextIOWrapper
+
+    from mcp.server.stdio import stdio_server
+
+    wire_fd = os.dup(1)  # private handle on the real stdout, for JSON-RPC only
+    os.dup2(2, 1)  # fd 1 -> stderr: nothing else can reach the wire by accident
+    sys.stdout = sys.stderr  # print()/sys.stdout.write -> stderr
+
+    async def _run() -> None:
+        out = anyio.wrap_file(TextIOWrapper(os.fdopen(wire_fd, "wb"), encoding="utf-8"))
+        in_ = anyio.wrap_file(
+            TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+        )
+        async with stdio_server(stdin=in_, stdout=out) as (read_stream, write_stream):
+            await mcp._mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp._mcp_server.create_initialization_options(),
+            )
+
+    anyio.run(_run)
 
 
 if __name__ == "__main__":

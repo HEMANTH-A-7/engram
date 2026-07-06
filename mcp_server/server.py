@@ -18,10 +18,13 @@ Honest constraints, stated up front:
   constraint. Callers should treat one dataset as active at a time; the
   `dataset` args exist for the resolver's own SQLite scoping, not for
   concurrent multi-dataset Cognee indexes.
-- **Write/forget are serialized under a lock.** Both call the full
+- **Write/forget are serialized under two locks.** Both call the full
   reset+cognify cycle; two overlapping calls would race on that shared data
-  root. `_pipeline_lock` makes them mutually exclusive. Reads
-  (`memory_search`, `memory_stats`) don't take it -- they only read.
+  root. `_pipeline_lock` (asyncio) makes them mutually exclusive *within*
+  this process; `core.locks.pipeline_lock` (flock) extends that across
+  processes, since every MCP client session spawns its own server process
+  against the same data root. Reads (`memory_search`, `memory_stats`)
+  don't take either -- they only read.
 
 The four tool bodies are plain `async def` functions registered with
 `@mcp.tool()` (which returns the original callable in mcp >= 1.x), so the
@@ -34,12 +37,18 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime
 
 from cognee.modules.retrieval.exceptions.exceptions import NoDataError
 from mcp.server.fastmcp import FastMCP
 
 from core import consolidation, ingest, resolver, router
 from core.config import REPO_ROOT
+from core.locks import pipeline_lock
+
+# memory_search's k, clamped: 0/negative make no sense, and an enormous k is
+# just a slow no-op against Cognee -- bound it rather than pass garbage through.
+MAX_SEARCH_K = 50
 
 RESULTS_DIR = REPO_ROOT / "benchmark" / "results"
 
@@ -82,8 +91,18 @@ async def memory_write(content: str, metadata: dict | None = None) -> dict:
     metadata = metadata or {}
     dataset = metadata.get("dataset", "main_dataset")
     event_time = metadata.get("event_time")
+    if event_time is not None:
+        # Validate before any LLM call: a malformed timestamp would otherwise
+        # land in the resolver's bi-temporal columns as-is and quietly corrupt
+        # version ordering. Fail loud and cheap instead.
+        try:
+            datetime.fromisoformat(str(event_time))
+        except ValueError as exc:
+            raise ValueError(
+                f"metadata.event_time must be an ISO-8601 timestamp, got {event_time!r}"
+            ) from exc
 
-    async with _pipeline_lock:
+    async with _pipeline_lock, pipeline_lock():
         result = await ingest.remember(content, dataset=dataset, event_time=event_time)
 
     write = result.write
@@ -124,6 +143,7 @@ async def memory_search(query: str, k: int = 5, dataset: str = "main_dataset") -
     agent-facing tool that's just "no results," so it's caught and reported
     as empty lists, not surfaced as a tool error.
     """
+    k = max(1, min(int(k), MAX_SEARCH_K))
     try:
         hits = await consolidation.search(query, dataset=dataset, k=k)
     except NoDataError:
@@ -191,7 +211,7 @@ async def memory_forget(id: int, dataset: str = "main_dataset") -> dict:
     if target is None:
         return {"found": False, "evicted_id": None}
 
-    async with _pipeline_lock:
+    async with _pipeline_lock, pipeline_lock():
         resolver.evict(id, dataset=dataset)
         await consolidation.resync_active(dataset)
 

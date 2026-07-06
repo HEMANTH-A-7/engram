@@ -102,6 +102,9 @@ def configure(data_dir: Path | None = None, system_dir: Path | None = None) -> N
     system_dir = system_dir or SYSTEM_DIR
     data_dir.mkdir(parents=True, exist_ok=True)
     system_dir.mkdir(parents=True, exist_ok=True)
+    # Both roots hold private memory text -- owner-only, not umask-default.
+    data_dir.chmod(0o700)
+    system_dir.chmod(0o700)
     cognee.config.data_root_directory(str(data_dir))
     cognee.config.system_root_directory(str(system_dir))
     # Swap Cognee's required-field summarization model for the lenient one so a

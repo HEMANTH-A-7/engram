@@ -19,7 +19,16 @@ from benchmark import harness
 from core import resolver
 from dashboard.app import app
 
-client = TestClient(app)
+# base_url matters now: the TrustedHost middleware only admits literally-local
+# hostnames, and TestClient's default Host ("testserver") isn't one.
+client = TestClient(app, base_url="http://localhost")
+
+
+def test_rejects_non_local_host_header():
+    # DNS-rebinding guard: a page on evil.example that rebinds its DNS to
+    # 127.0.0.1 sends `Host: evil.example` -- the API must refuse to answer.
+    resp = client.get("/api/live", headers={"host": "evil.example"})
+    assert resp.status_code == 400
 
 
 def test_index_serves_html():

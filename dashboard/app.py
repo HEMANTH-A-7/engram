@@ -22,6 +22,7 @@ import json
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core import live_metrics
 from core.config import REPO_ROOT
@@ -31,6 +32,13 @@ RESULTS_DIR = REPO_ROOT / "benchmark" / "results"
 STATIC_DIR = REPO_ROOT / "dashboard" / "static"
 
 app = FastAPI(title="memory-layer dashboard")
+
+# DNS-rebinding guard: binding to 127.0.0.1 keeps remote hosts out, but a
+# malicious webpage whose domain rebinds to 127.0.0.1 could still read the
+# API (memory contents) from the victim's own browser -- same-origin policy
+# doesn't apply once the attacker controls the hostname. Rejecting any Host
+# header that isn't literally local closes that off.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 
 
 @app.get("/api/results")

@@ -117,10 +117,14 @@ def configure(db_path: Path | None = None) -> None:
     global _configured, _db_path
     _db_path = db_path or DB_PATH
     _db_path.parent.mkdir(parents=True, exist_ok=True)
+    # The DB holds private memory contents -- keep it owner-only rather than
+    # the default umask (which leaves it world-readable on a shared machine).
+    _db_path.parent.chmod(0o700)
     with _connect() as conn:
         conn.executescript(_SCHEMA)
         _migrate(conn)
         conn.commit()
+    _db_path.chmod(0o600)
     _configured = True
 
 

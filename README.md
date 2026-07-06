@@ -1,6 +1,8 @@
-# memory-layer
+# engram
 
-Extended memory layer for AI agents, built on [Cognee](https://github.com/topoteretes/cognee).
+An [engram](https://en.wikipedia.org/wiki/Engram_(neuropsychology)) is the physical
+trace a memory leaves in the brain. This one is an extended memory layer for AI
+agents, built on [Cognee](https://github.com/topoteretes/cognee).
 Adds bi-temporal conflict resolution, tiered consolidation/forgetting, a cost-aware
 extraction router, an MCP server, and a benchmark-driven local dashboard.
 

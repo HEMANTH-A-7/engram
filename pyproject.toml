@@ -1,5 +1,5 @@
 [project]
-name = "memory-layer"
+name = "engram"
 version = "0.1.0"
 description = "Extended memory layer for AI agents: bi-temporal conflict resolution, tiered consolidation, and benchmarks over Cognee."
 readme = "README.md"

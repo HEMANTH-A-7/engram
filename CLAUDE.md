@@ -1,4 +1,4 @@
-# memory-layer — context for Claude
+# engram — context for Claude
 
 Extended memory layer over Cognee: bi-temporal conflict resolution, tiered
 consolidation/forgetting, cost-aware LLM routing, MCP server, live dashboard.

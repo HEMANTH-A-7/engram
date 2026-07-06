@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from core import live_metrics
 from core.config import REPO_ROOT
 from mcp_server.server import memory_stats
 
@@ -54,6 +55,28 @@ async def api_results() -> dict:
 async def api_stats() -> dict:
     """Live pipeline stats (current fact tiers + cost + benchmarks)."""
     return await memory_stats()
+
+
+@app.get("/api/live")
+async def api_live(dataset: str = "main_dataset") -> dict:
+    """Everything the dashboard charts render, all computed from the live
+    dataset -- no benchmark JSONs involved.
+
+    Composes the resolver/cost view (`memory_stats`, reused as the single source
+    of truth for fact counts + the cost ledger) with the read-only
+    `live_metrics` (token savings, storage growth, revision counts) derived from
+    the dataset's real write history. Read-only: safe to poll on a timer.
+    """
+    stats = await memory_stats(dataset)
+    live = live_metrics.live_report(dataset)
+    return {
+        "dataset": dataset,
+        "facts": stats["facts"],
+        "cost": stats["cost"],
+        "tokens": live["tokens"],
+        "storage": live["storage"],
+        "revisions": live["revisions"],
+    }
 
 
 @app.get("/")

@@ -344,6 +344,25 @@ def current_facts(dataset: str = "main_dataset", tiers: set[str] | None = None) 
     return facts
 
 
+def all_versions(dataset: str = "main_dataset") -> list[Fact]:
+    """Every fact row for a dataset -- current, superseded, and evicted -- in
+    insertion order.
+
+    Read-only counterpart to `current_facts` for the "raw history vs. memory
+    layer" dashboard metrics: `current_facts` is what the layer surfaces now,
+    while this is the full write history (every version ever recorded). The
+    difference between the two is exactly what supersede-not-overwrite saves.
+    Ordered by `id` so callers can replay writes chronologically.
+    """
+    _ensure_configured()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM facts WHERE dataset = ? ORDER BY id",
+            (dataset,),
+        ).fetchall()
+    return [_row_to_fact(r) for r in rows]
+
+
 def record_access(fact_id: int, dataset: str = "main_dataset", now: str | None = None) -> None:
     """Bump `access_count` and set `last_accessed` for a fact that was retrieved."""
     _ensure_configured()

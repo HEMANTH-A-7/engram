@@ -1,7 +1,8 @@
-// Dashboard frontend: fetch /api/results + /api/stats and render five cards.
-// Chart.js is loaded locally (see index.html). Every card degrades gracefully
-// to a "metric not generated yet" placeholder if its backing JSON is missing,
-// so a fresh checkout (no benchmark run yet) still renders without errors.
+// Dashboard frontend: poll /api/live and render three cards, all computed from
+// the real dataset (no benchmark JSONs). Chart.js is loaded locally (see
+// index.html). Charts are created once and then updated in place on each poll,
+// so a 4s refresh never leaks canvases. Every card degrades to a "no data yet"
+// placeholder if its slice is missing, so an empty dataset still renders.
 
 const COLORS = {
   accent: "#4dabf7",
@@ -16,27 +17,50 @@ Chart.defaults.color = COLORS.text;
 Chart.defaults.font.family =
   "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
-function markMissing(cardId, msg) {
-  const card = document.getElementById(cardId);
-  if (!card) return;
-  card.classList.add("missing");
-  const p = document.createElement("p");
-  p.className = "placeholder";
-  p.textContent = msg || "Metric not generated yet — run the benchmark harness.";
-  card.appendChild(p);
-}
+// Chart instances, created lazily on first data and reused thereafter.
+const charts = {};
 
 function pct(x) {
   return (x * 100).toFixed(1) + "%";
+}
+
+function markMissing(cardId, msg) {
+  const card = document.getElementById(cardId);
+  if (!card || card.querySelector(".placeholder")) return;
+  card.classList.add("missing");
+  const p = document.createElement("p");
+  p.className = "placeholder";
+  p.textContent = msg || "No data yet — write a memory to populate this.";
+  card.appendChild(p);
+}
+
+// Create the chart on first call, then just swap data + redraw on later calls.
+function upsertChart(key, canvasId, config) {
+  if (charts[key]) {
+    charts[key].data = config.data;
+    charts[key].update();
+    return charts[key];
+  }
+  charts[key] = new Chart(document.getElementById(canvasId), config);
+  return charts[key];
+}
+
+function renderLiveHeader(facts) {
+  if (!facts) return;
+  document.getElementById("live-total").textContent = facts.total_current;
+  document.getElementById("live-hot").textContent = facts.by_tier.hot;
+  document.getElementById("live-warm").textContent = facts.by_tier.warm;
+  document.getElementById("live-cold").textContent = facts.by_tier.cold;
 }
 
 function renderTokens(tokens) {
   if (!tokens) return markMissing("card-tokens");
   document.getElementById("tokens-headline").textContent = pct(tokens.pct_saved);
   document.getElementById("tokens-caption").textContent =
-    `${tokens.tokens_saved} of ${tokens.raw_history_tokens} estimated tokens saved (est. ~4 chars/token)`;
+    `${tokens.tokens_saved} of ${tokens.raw_history_tokens} estimated tokens saved ` +
+    `across ${tokens.n_writes} writes (est. ~4 chars/token)`;
 
-  new Chart(document.getElementById("tokens-chart"), {
+  upsertChart("tokens", "tokens-chart", {
     type: "bar",
     data: {
       labels: ["Raw history", "Memory layer"],
@@ -59,69 +83,42 @@ function renderTokens(tokens) {
   });
 }
 
-function renderConflict(conflict) {
-  if (!conflict) return markMissing("card-conflict");
-  new Chart(document.getElementById("conflict-chart"), {
+function renderRevisions(rev) {
+  if (!rev) return markMissing("card-revisions");
+  document.getElementById("revisions-headline").textContent = rev.revisions;
+  document.getElementById("revisions-caption").textContent =
+    `in-place updates the resolver made · ${rev.evicted} evicted · ${rev.current} current facts`;
+
+  const t = rev.by_tier || { hot: 0, warm: 0, cold: 0 };
+  upsertChart("tiers", "tiers-chart", {
     type: "bar",
     data: {
-      labels: ["Accuracy", "Stale-leak rate"],
+      labels: ["Hot", "Warm", "Cold"],
       datasets: [
         {
-          label: "Resolver (extended)",
-          data: [conflict.resolver.accuracy, conflict.resolver.stale_leak_rate],
-          backgroundColor: COLORS.accent2,
-          borderRadius: 4,
-        },
-        {
-          label: "Naive overwrite (baseline)",
-          data: [conflict.naive_overwrite.accuracy, conflict.naive_overwrite.stale_leak_rate],
-          backgroundColor: COLORS.warn,
+          label: "Current facts by tier",
+          data: [t.hot, t.warm, t.cold],
+          backgroundColor: [COLORS.danger, COLORS.warn, COLORS.accent],
           borderRadius: 4,
         },
       ],
     },
     options: {
-      plugins: { legend: { position: "bottom" } },
+      plugins: { legend: { display: false } },
       scales: {
-        y: { beginAtZero: true, max: 1, grid: { color: COLORS.grid } },
+        y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: COLORS.grid } },
         x: { grid: { display: false } },
       },
     },
   });
 }
 
-function renderCost(cost) {
-  if (!cost) return markMissing("card-cost");
-  const report = cost.cost_report || {};
-  const perK = report.usd_per_1000_memories;
-  document.getElementById("cost-headline").textContent =
-    perK == null ? "—" : "$" + perK.toFixed(4);
-  document.getElementById("cost-caption").textContent =
-    `Cascade savings vs. large-only: $${(cost.cascade_savings_usd ?? 0).toFixed(6)} · ` +
-    `escalated to large: ${pct(cost.escalated_to_large_rate ?? 0)}`;
-  document.getElementById("cost-note").textContent = report.pricing_note || "";
-}
-
-function renderRegret(forgetting) {
-  if (!forgetting) return markMissing("card-regret");
-  const el = document.getElementById("regret-headline");
-  el.textContent = pct(forgetting.regret_rate);
-  // High regret here is by construction (see note), so warn rather than danger.
-  el.style.color = forgetting.regret_rate > 0.25 ? COLORS.warn : COLORS.accent2;
-  const n = forgetting.evicted_count ?? forgetting.n_cases ?? 0;
-  const note = document.getElementById("regret-note");
-  if (note) {
-    note.textContent =
-      `Synthetic stress test (n=${n}): every evicted fact is deliberately ` +
-      `re-requested, so 100% confirms the revival path fires — not a ` +
-      `production regret signal.`;
-  }
-}
-
 function renderStorage(storage) {
-  if (!storage || !storage.series) return markMissing("card-storage");
+  if (!storage || !storage.series || !storage.series.length) {
+    return markMissing("card-storage");
+  }
   const series = storage.series;
-  new Chart(document.getElementById("storage-chart"), {
+  upsertChart("storage", "storage-chart", {
     type: "line",
     data: {
       labels: series.map((p) => p.facts_ingested),
@@ -145,58 +142,39 @@ function renderStorage(storage) {
     options: {
       plugins: { legend: { position: "bottom" } },
       scales: {
-        y: { beginAtZero: true, grid: { color: COLORS.grid }, title: { display: true, text: "facts stored" } },
-        x: { grid: { display: false }, title: { display: true, text: "facts ingested" } },
+        y: {
+          beginAtZero: true,
+          ticks: { precision: 0 },
+          grid: { color: COLORS.grid },
+          title: { display: true, text: "facts stored" },
+        },
+        x: {
+          grid: { display: false },
+          title: { display: true, text: "writes over time" },
+        },
       },
     },
   });
 }
 
-function renderLive(stats) {
-  if (!stats || !stats.facts) return;
-  const f = stats.facts;
-  document.getElementById("live-total").textContent = f.total_current;
-  document.getElementById("live-hot").textContent = f.by_tier.hot;
-  document.getElementById("live-warm").textContent = f.by_tier.warm;
-  document.getElementById("live-cold").textContent = f.by_tier.cold;
-}
-
-// Poll interval for the live header (ms). Charts are NOT re-fetched here:
-// the results JSONs only change on a benchmark-harness run, and re-rendering
-// Chart.js on a timer would leak canvases. Only /api/stats moves live.
+// Poll interval for the whole dashboard (ms). Everything here is live now.
 const LIVE_POLL_MS = 4000;
 
-// Fetch only the live resolver/router state and refresh the header. Safe to
-// call on a timer (no Chart.js work). Silently ignores transient fetch errors
-// so a blip doesn't clobber the last-known-good header.
-async function loadStats() {
+// Fetch the live payload and refresh every card. Silently keeps the
+// last-known-good render on a transient fetch error so a blip doesn't clear
+// the charts.
+async function loadLive() {
+  let data;
   try {
-    const stats = await fetch("/api/stats").then((r) => r.json());
-    renderLive(stats);
+    data = await fetch("/api/live").then((r) => r.json());
   } catch (err) {
-    /* keep last-known-good live values on a transient failure */
+    return; // keep last-known-good on a transient failure
   }
+  renderLiveHeader(data.facts);
+  renderTokens(data.tokens);
+  renderRevisions(data.revisions);
+  renderStorage(data.storage);
 }
 
-// One-shot: draw the charts (from saved benchmark JSON) + seed the live header.
-async function load() {
-  try {
-    const [results, stats] = await Promise.all([
-      fetch("/api/results").then((r) => r.json()),
-      fetch("/api/stats").then((r) => r.json()).catch(() => null),
-    ]);
-
-    renderTokens(results.tokens);
-    renderConflict(results.conflict);
-    renderCost(results.cost);
-    renderRegret(results.forgetting);
-    renderStorage(results.storage);
-    renderLive(stats);
-  } catch (err) {
-    document.getElementById("footer-note").textContent =
-      "Failed to load dashboard data: " + err;
-  }
-}
-
-load();
-setInterval(loadStats, LIVE_POLL_MS);
+loadLive();
+setInterval(loadLive, LIVE_POLL_MS);

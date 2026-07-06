@@ -296,15 +296,10 @@ async def run_cost_eval(label: str = "cost") -> dict:
     }
 
 
-def _estimate_tokens(text: str) -> int:
-    """Rough token count: ~4 chars/token. A deliberate *estimate*, not a real
-    tokenizer -- `tiktoken`'s vocab downloads on first use, which would break
-    this project's offline guarantee, and the memory-layer's value shows up in
-    the raw-vs-extended *ratio*, which a consistent estimator captures fine.
-    Documented as an estimate the same way the cost router's pricing is
-    documented as reference-not-real.
-    """
-    return round(len(text) / 4)
+# `_estimate_tokens` now lives in `core.live_metrics` (shared with the live
+# dashboard so both paths use one estimator); re-exported here for the evals
+# below and any callers that imported it from the harness.
+from core.live_metrics import _estimate_tokens  # noqa: E402
 
 
 # Pre-labeled (subject, relation, object, text) facts for the LLM-free

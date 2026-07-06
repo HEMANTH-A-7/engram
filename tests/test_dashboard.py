@@ -43,19 +43,26 @@ def test_api_stats_has_expected_keys():
     assert {"total_current", "by_tier"} <= set(body["facts"])
 
 
-def test_live_header_polls_stats_endpoint():
-    # The live header must refresh on a timer against /api/stats only (the
-    # charts stay one-shot). We can't run the JS here, so assert the served
-    # app.js wires up the poll: a setInterval that calls the stats-only loader.
+def test_api_live_has_expected_keys():
+    # Everything the charts render, all live from the dataset (no benchmark JSON).
+    resp = client.get("/api/live")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {"facts", "tokens", "storage", "revisions"} <= set(body)
+    assert {"raw_history_tokens", "extended_tokens", "pct_saved"} <= set(body["tokens"])
+    assert {"revisions", "evicted", "by_tier"} <= set(body["revisions"])
+    assert "series" in body["storage"]
+
+
+def test_dashboard_polls_live_endpoint():
+    # The whole dashboard refreshes on a timer against /api/live. We can't run
+    # the JS here, so assert the served app.js wires up the poll: a setInterval
+    # that calls the live loader, which fetches /api/live.
     resp = client.get("/static/app.js")
     assert resp.status_code == 200
     body = resp.text
-    assert "setInterval(loadStats" in body
-    assert 'fetch("/api/stats")' in body
-    # The poll must not re-fetch the heavy results JSON (would leak Chart.js
-    # canvases); loadStats touches stats only.
-    loader = body[body.index("async function loadStats") : body.index("async function load(")]
-    assert "/api/results" not in loader
+    assert "setInterval(loadLive" in body
+    assert 'fetch("/api/live")' in body
 
 
 def test_estimate_tokens_grows_with_length():

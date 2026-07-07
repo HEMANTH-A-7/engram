@@ -7,12 +7,11 @@ bi-temporal versioning, then rebuilds Cognee's index from
 `resolver.current_facts()` so a superseded fact's text can never remain
 searchable.
 
-Every `remember()` call does a full `store.reset_and_load()` rather than an
-incremental add. That's intentionally not efficient — it guarantees
-correctness (no stale text ever lingers in the index) for the single-dataset
-scope this bucket targets. `store.reset()` itself wipes Cognee's whole
-configured data root, not just one dataset, so — like the Bucket 1/2
-baseline — callers should treat one dataset as active at a time.
+POST-PIVOT NOTE (Session 9): the MCP serving path calls
+`remember(sync=False)` and maintains `core/index.py` incrementally instead —
+`resync()`/`sync=True` (full `store.reset_and_load()`, which wipes Cognee's
+whole configured data root) survives ONLY for the Cognee-based benchmark and
+demo paths, where one dataset at a time is still the rule.
 """
 
 from __future__ import annotations

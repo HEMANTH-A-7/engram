@@ -22,6 +22,7 @@ index in sync with `current_facts()`.
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -30,7 +31,10 @@ from pathlib import Path
 
 from core.config import REPO_ROOT
 
-DB_PATH = REPO_ROOT / ".resolver_data" / "facts.db"
+# MEMORY_DB_PATH override exists for the Claude Code hook scripts' tests
+# (scripts/hooks/*), which run as subprocesses and can't call configure()
+# with a tmp path directly. Normal callers never set it.
+DB_PATH = Path(os.environ.get("MEMORY_DB_PATH", REPO_ROOT / ".resolver_data" / "facts.db"))
 
 _configured = False
 _db_path = DB_PATH
@@ -131,6 +135,14 @@ def configure(db_path: Path | None = None) -> None:
 def _ensure_configured() -> None:
     if not _configured:
         configure()
+
+
+def db_path() -> Path:
+    """The active SQLite path. Public so sibling modules (core.index, core.notes)
+    can share one database file — and therefore follow test reconfiguration
+    (`configure(tmp_path/...)`) automatically."""
+    _ensure_configured()
+    return _db_path
 
 
 def _connect() -> sqlite3.Connection:
@@ -243,9 +255,18 @@ async def write(
 
     distinct = False
     if current is not None and _is_ambiguous(current.object, object_):
-        from core import router  # local import: avoids a resolver<->router cycle at module load
+        # The LLM conflict judge is OPTIONAL (engram-lite): core/router.py
+        # pulls in the local-LLM stack (instructor/openai → Ollama), which a
+        # no-LLM install doesn't have. If it can't be imported or the call
+        # fails, fall back to the deterministic default — treat the newer
+        # write as an update (supersede) — rather than blocking the write.
+        # Both versions stay in history either way; nothing is lost.
+        try:
+            from core import router  # local import: avoids a cycle at module load
 
-        verdict = await router.judge_conflict(current.text, text)
+            verdict = await router.judge_conflict(current.text, text)
+        except Exception:  # noqa: BLE001 — no local LLM available
+            verdict = "update"
         if verdict == "same":
             return WriteResult(fact=current, superseded=None, changed=False)
         distinct = verdict == "distinct"

@@ -70,11 +70,11 @@ async def test_memory_search_clamps_k(tmp_path, monkeypatch):
     resolver.configure(db_path=tmp_path / "facts.db")
     seen: list[int] = []
 
-    async def _fake_search(query, dataset="main_dataset", k=5):
+    def _fake_search(dataset, query, k=5):
         seen.append(k)
-        return []
+        return server.index.SearchResult(hits=[], mode="keyword")
 
-    monkeypatch.setattr(server.consolidation, "search", _fake_search)
+    monkeypatch.setattr(server.index, "search", _fake_search)
 
     await server.memory_search("anything", k=-3)
     await server.memory_search("anything", k=10_000)

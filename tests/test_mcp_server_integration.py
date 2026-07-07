@@ -26,7 +26,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from core import resolver, router
+from core import index, resolver, router
 from core.config import REPO_ROOT
 from mcp_server import server
 
@@ -37,6 +37,7 @@ pytestmark = pytest.mark.integration
 async def test_write_search_stats_forget_end_to_end():
     dataset = "test_mcp_dataset"
     resolver.reset(dataset)
+    index.remove_dataset(dataset)  # post-pivot: the index persists per-dataset
     router.reset_ledger()
 
     written = await server.memory_write(
@@ -83,7 +84,14 @@ async def test_server_advertises_all_four_tools_over_stdio():
             result = await session.list_tools()
 
     names = {t.name for t in result.tools}
-    assert {"memory_write", "memory_search", "memory_stats", "memory_forget"} <= names
+    assert {
+        "memory_write",
+        "memory_search",
+        "memory_stats",
+        "memory_forget",
+        "memory_note",
+        "memory_context",
+    } <= names
 
 
 def _tool_payload(result) -> dict:
@@ -103,7 +111,15 @@ def _tool_payload(result) -> dict:
 
 @pytest.mark.asyncio
 async def test_memory_write_round_trip_keeps_the_wire_clean():
-    """A real stdio client must survive memory_write, which runs cognify().
+    """A real stdio client must survive memory_write.
+
+    POST-PIVOT NOTE (Session 9): memory_write no longer runs cognify() — the
+    serving path is the owned incremental index. The test remains as the
+    stdout-wire guard by construction (a real client validates every wire
+    line), now exercising the extraction-LLM + incremental-index path. The
+    original cognify-era rationale is preserved below for history.
+
+    Original rationale — a real stdio client must survive memory_write, which ran cognify():
 
     This is the regression test for commit 0332cd7. memory_write is the tool
     that drives Cognee's cognify(), whose DB layer prints chatter ("table
@@ -134,6 +150,7 @@ async def test_memory_write_round_trip_keeps_the_wire_clean():
     """
     dataset = "test_mcp_stdio_write"
     resolver.reset(dataset)
+    index.remove_dataset(dataset)
 
     params = StdioServerParameters(
         command="uv",

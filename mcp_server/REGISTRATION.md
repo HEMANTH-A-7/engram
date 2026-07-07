@@ -14,6 +14,15 @@ only). Each client spawns it as a subprocess and talks to it over stdin/stdout.
 > Paths below are absolute for this machine. On another checkout, replace
 > `/Users/hemanth/Documents/Cognee-project` with that repo's absolute path.
 
+> **Per-project memory (Session 9 pivot):** when registering this server in
+> ANOTHER project's `.mcp.json`, add
+> `"env": { "MEMORY_PROJECT_DIR": "/path/to/that/project" }` so its tools key
+> to that project's own dataset (the server can't trust its cwd —
+> `uv run --directory` rewrites it to this repo). Without it, tools fall back
+> to the shared `main_dataset`. For the fully automatic layer (SessionStart
+> digest injection, PreCompact save, Stop rolling state), see
+> [`docs/HOOKS.md`](../docs/HOOKS.md).
+
 ---
 
 ## 1. Claude Code — `.mcp.json` (committed to the repo)

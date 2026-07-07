@@ -52,6 +52,9 @@ def measure_note_writes(n: int) -> dict:
             result = notes.add_note(text, kind="progress", dataset="pivot_bench")
             latencies.append(time.perf_counter() - t0)
             embedded_ok += int(result.embedded)
+    # Restore the default DB: the tmp dir above is gone once this block exits,
+    # and measure_digest() runs after us against the real dataset.
+    resolver.configure()
     latencies.sort()
     return {
         "n": n,

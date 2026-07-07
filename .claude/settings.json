@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/hemanth/Documents/Cognee-project/.venv/bin/python /Users/hemanth/Documents/Cognee-project/scripts/hooks/session_start.py"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/hemanth/Documents/Cognee-project/.venv/bin/python /Users/hemanth/Documents/Cognee-project/scripts/hooks/pre_compact.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/hemanth/Documents/Cognee-project/.venv/bin/python /Users/hemanth/Documents/Cognee-project/scripts/hooks/stop.py"
+          }
+        ]
+      }
+    ]
+  }
+}

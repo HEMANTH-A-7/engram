@@ -9,7 +9,10 @@
         "python",
         "-m",
         "mcp_server.server"
-      ]
+      ],
+      "env": {
+        "MEMORY_PROJECT_DIR": "/Users/hemanth/Documents/Cognee-project"
+      }
     }
   }
 }

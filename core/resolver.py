@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 CREATE INDEX IF NOT EXISTS idx_facts_current
     ON facts (dataset, canonical_key, valid_to);
+CREATE TABLE IF NOT EXISTS dupe_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset TEXT NOT NULL,
+    fact_a INTEGER NOT NULL,
+    fact_b INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolution TEXT,
+    UNIQUE (dataset, fact_a, fact_b)
+);
 """
 
 
@@ -91,6 +102,7 @@ class WriteResult:
     changed: bool  # False when the write restates the already-current fact
     revived_from_eviction: bool = False  # True when this key was previously evicted
     distinct: bool = False  # True when an ambiguous conflict was judged non-conflicting
+    flagged_duplicate: int | None = None  # id of a near-dupe fact flagged, not merged
 
 
 _MIGRATIONS: tuple[tuple[str, str], ...] = (
@@ -271,6 +283,37 @@ async def write(
             return WriteResult(fact=current, superseded=None, changed=False)
         distinct = verdict == "distinct"
 
+    # Near-duplicate guard (Session 12): the exact key missed, but the same
+    # normalized subject may hold this attribute under another relation
+    # spelling ("prefers" vs "storage_preference") — the case the canonical
+    # key can't see. With the optional judge: resolve like any ambiguous
+    # conflict. Without it (no-LLM floor): flag, never auto-merge — a wrong
+    # merge hides a fact, a flag just asks the user (see core/dedupe.py).
+    # Fail-open: a dedupe bug must never break a write.
+    near_flag_id: int | None = None
+    if current is None:
+        try:
+            from core import dedupe  # local import: avoids a cycle at module load
+
+            near = dedupe.find_near_duplicate(dataset, subject, relation)
+        except Exception:  # noqa: BLE001 — guard is best-effort by design
+            near = None
+        if near is not None:
+            try:
+                from core import router  # local import: optional LLM stack
+
+                near_verdict = await router.judge_conflict(near.text, text)
+            except Exception:  # noqa: BLE001 — no judge available
+                near_verdict = None
+            if near_verdict == "same":
+                return WriteResult(fact=near, superseded=None, changed=False)
+            if near_verdict == "update":
+                current = near  # supersede the near-dupe row below
+            elif near_verdict == "distinct":
+                pass  # judge says both hold; write normally, no flag
+            else:
+                near_flag_id = near.id  # floor: flag after the insert
+
     with _connect() as conn:
         revived = False
         if current is None:
@@ -336,6 +379,16 @@ async def write(
                 importance=current.importance,
                 evicted_at=current.evicted_at,
             )
+        if near_flag_id is not None:
+            a, b = sorted((near_flag_id, new_id))
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO dupe_flags
+                    (dataset, fact_a, fact_b, reason, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (dataset, a, b, "write-time near-duplicate (no judge available)", now),
+            )
         conn.commit()
 
     return WriteResult(
@@ -344,6 +397,7 @@ async def write(
         changed=True,
         revived_from_eviction=revived,
         distinct=distinct,
+        flagged_duplicate=near_flag_id,
     )
 
 

@@ -221,6 +221,7 @@ async def memory_write(
         "superseded": _fact_summary(write.superseded),
         "revived": write.revived_from_eviction,
         "distinct": write.distinct,
+        "flagged_duplicate": write.flagged_duplicate,  # near-dupe fact id, flagged not merged
         "indexed": indexed,  # False = stored, embedding pending (endpoint down)
         "cognify_attempts": 0,  # legacy field: Cognee is no longer on this path
     }
@@ -343,9 +344,20 @@ async def memory_stats(
             ),
         }
 
+    # Possible near-duplicate pairs (write-time guard / batch sweep; both are
+    # flag-only without the optional judge — see core/dedupe.py). Best-effort:
+    # stats must stay cheap and unbreakable.
+    try:
+        from core import dedupe
+
+        dupes = dedupe.unresolved_flags(ds)
+    except Exception:  # noqa: BLE001
+        dupes = []
+
     return {
         "dataset": ds,
         "facts": {"total_current": len(facts), "by_tier": by_tier},
+        "possible_duplicates": {"count": len(dupes), "pairs": dupes},
         "notes": {"total_current": len(current_notes), "by_kind": by_kind},
         "index": {
             "indexed": index.indexed_count(ds),

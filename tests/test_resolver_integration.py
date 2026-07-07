@@ -20,6 +20,12 @@ import pytest
 
 from core import resolver, router
 
+# The docstring above always said "Marked `integration`", but this line was
+# missing — so these real-Ollama tests silently ran inside the "LLM-free"
+# fast suite (passing only when Ollama happened to be up). Caught in Session
+# 10 when the fast suite ran in a no-Ollama sandbox for the first time.
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.asyncio
 async def test_ambiguous_conflict_routes_through_judge_conflict(tmp_path):

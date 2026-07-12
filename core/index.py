@@ -20,8 +20,9 @@ individually, `dataset` scoping makes per-project isolation free, and the
 `remove_item()` at write time. Cognee is not imported here — it remains the
 benchmark/demo engine only.
 
-`search()` NEVER raises for infrastructure reasons: worst case is keyword
-mode. Writes always land: a vector that can't be computed is stored as
+`search()` NEVER raises for infrastructure reasons: embed endpoint down →
+keyword mode; index storage itself unreachable → empty `mode="unavailable"`
+result. Writes always land: a vector that can't be computed is stored as
 pending and filled in opportunistically later.
 """
 
@@ -83,7 +84,9 @@ class Hit:
 @dataclass(frozen=True)
 class SearchResult:
     hits: list[Hit]
-    mode: str  # 'hybrid' (keyword + semantic) | 'keyword' (FTS5 only)
+    # 'hybrid' (keyword + semantic) | 'keyword' (FTS5 only) |
+    # 'unavailable' (index storage unreachable — empty result, never an exception)
+    mode: str
 
 
 def _connect() -> sqlite3.Connection:
@@ -318,11 +321,17 @@ def search(dataset: str, query: str, k: int = 5) -> SearchResult:
     moment it's back.
     """
     k = max(1, k)
-    _ensure_fts_synced(dataset)
-    kw = _keyword_search(dataset, query, k)
+    try:
+        _ensure_fts_synced(dataset)
+        kw = _keyword_search(dataset, query, k)
+    except sqlite3.Error:
+        # The DB file itself is unopenable/corrupt (seen: sqlite over a
+        # read-only mount). A search tool must degrade, not crash the caller:
+        # empty result, mode says why.
+        return SearchResult(hits=[], mode="unavailable")
     try:
         sem = _semantic_search(dataset, query, k)
-    except EmbeddingUnavailable:
+    except (EmbeddingUnavailable, sqlite3.Error):
         return SearchResult(hits=kw[:k], mode="keyword")
 
     # Reciprocal-rank fusion across the two ranked lists.

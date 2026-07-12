@@ -52,7 +52,8 @@ uv run python scripts/try_memory.py remember "..."   # hand-test the pipeline
 - **Serving path imports neither Cognee nor the LLM stack at module load**
   (`mcp_server/server.py` starts in ~150ms; extraction/judge are lazy,
   optional fallbacks). `index.search()` never raises for infrastructure
-  reasons — worst case is FTS5 keyword mode, reported in `mode`/`ranking`.
+  reasons — embed down → keyword mode; DB unopenable → empty
+  `mode="unavailable"`; the mode used is always reported.
 - Per-project isolation: nothing on the serving path may touch another
   dataset's rows; destructive helpers must be dataset-scoped.
 - Hook scripts (`scripts/hooks/`) stay import-light (never import Cognee)

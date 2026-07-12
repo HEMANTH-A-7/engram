@@ -132,3 +132,15 @@ async def test_backfill_indexes_pre_pivot_facts():
 
     hits = index.search("ds", "Where does Alice live?", k=1).hits
     assert hits[0].text == "Alice lives in Boston."
+
+
+def test_search_degrades_when_db_unopenable(tmp_path, monkeypatch):
+    """The Session 12 mount failure class: the SQLite file itself can't be
+    opened (read-only mount, corrupt file, dir in the way). search() must
+    return an empty result with mode="unavailable" — never raise."""
+    monkeypatch.setattr(resolver, "db_path", lambda: tmp_path)  # a directory, not a DB
+
+    result = index.search("ds", "anything at all", k=5)
+
+    assert result.hits == []
+    assert result.mode == "unavailable"
